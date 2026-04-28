@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "butchc"
+version = "0.1.0"
+description = "Bayesian Update Tree Chained Conditionally — a dependency-free probabilistic black-box hyperparameter optimizer"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+keywords = [
+    "hyperparameter optimization",
+    "bayesian optimization",
+    "black-box optimization",
+    "tree search",
+    "machine learning",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/malhar/BUTChC"
+Repository = "https://github.com/malhar/BUTChC"
+
+[tool.setuptools.packages.find]
+include = ["butchc*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
