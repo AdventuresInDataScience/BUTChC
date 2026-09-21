@@ -1,0 +1,5 @@
+# Real-world evaluation tier only. The butchc package itself has no
+# dependencies and must never import anything listed here.
+yahpo-gym>=1.0
+ConfigSpace>=0.6
+optuna>=3.0

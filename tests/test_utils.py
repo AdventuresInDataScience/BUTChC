@@ -1,150 +1,143 @@
-"""Tests for butchc._utils: softmax, _silverman_bandwidth, _compute_trial_loss."""
+"""Unit tests for butchc._utils."""
+
 import math
+
 import pytest
 
 from butchc._utils import (
-    KDE_RESERVOIR_SIZE,
-    _compute_trial_loss,
-    _silverman_bandwidth,
+    MIN_BANDWIDTH_FRACTION,
+    compute_trial_loss,
+    effective_sample_size,
+    is_finite_number,
+    reflect,
+    silverman_bandwidth,
     softmax,
+    weighted_mean,
 )
-
-
-class TestKDEReservoirSize:
-    def test_is_positive_integer(self):
-        assert isinstance(KDE_RESERVOIR_SIZE, int)
-        assert KDE_RESERVOIR_SIZE > 0
-
-    def test_value_is_fifty(self):
-        assert KDE_RESERVOIR_SIZE == 50
 
 
 class TestSoftmax:
     def test_sums_to_one(self):
-        result = softmax([1.0, 2.0, 3.0])
-        assert abs(sum(result) - 1.0) < 1e-9
+        assert sum(softmax([1.0, 2.0, 3.0])) == pytest.approx(1.0)
 
-    def test_length_preserved(self):
-        logits = [0.5, 1.5, 2.5, 3.5]
-        assert len(softmax(logits)) == len(logits)
+    def test_all_probabilities_positive(self):
+        assert all(p > 0 for p in softmax([-50.0, 0.0, 50.0]))
 
-    def test_all_probabilities_non_negative(self):
-        result = softmax([1.0, 2.0, 3.0])
-        assert all(p >= 0.0 for p in result)
+    def test_uniform_logits_give_uniform_output(self):
+        assert softmax([2.0] * 4) == pytest.approx([0.25] * 4)
 
-    def test_all_probabilities_at_most_one(self):
-        result = softmax([1.0, 2.0, 3.0])
-        assert all(p <= 1.0 for p in result)
+    def test_identity_on_log_probs_at_temp_one(self):
+        probs = [0.5, 0.3, 0.2]
+        out = softmax([math.log(p) for p in probs], temp=1.0)
+        assert out == pytest.approx(probs)
 
-    def test_higher_logit_gets_higher_prob(self):
-        result = softmax([1.0, 3.0])
-        assert result[1] > result[0]
+    def test_high_temp_flattens(self):
+        sharp = softmax([0.0, 5.0], temp=1.0)
+        flat = softmax([0.0, 5.0], temp=10.0)
+        assert flat[1] - flat[0] < sharp[1] - sharp[0]
 
-    def test_single_element_returns_one(self):
-        result = softmax([42.0])
-        assert abs(result[0] - 1.0) < 1e-9
+    def test_low_temp_sharpens(self):
+        sharp = softmax([0.0, 1.0], temp=0.1)
+        assert sharp[1] > 0.99
 
-    def test_equal_logits_give_uniform_distribution(self):
-        result = softmax([5.0, 5.0, 5.0])
-        for p in result:
-            assert abs(p - 1 / 3) < 1e-9
+    def test_no_overflow_on_large_logits(self):
+        assert sum(softmax([1e5, 1e5 + 1])) == pytest.approx(1.0)
 
-    def test_high_temp_flattens_toward_uniform(self):
-        logits = [1.0, 10.0]
-        probs = softmax(logits, temp=100.0)
-        assert abs(probs[0] - 0.5) < 0.05
+    def test_rejects_non_positive_temp(self):
+        with pytest.raises(ValueError):
+            softmax([1.0, 2.0], temp=0.0)
+        with pytest.raises(ValueError):
+            softmax([1.0, 2.0], temp=-1.0)
 
-    def test_low_temp_concentrates_on_maximum(self):
-        logits = [1.0, 10.0]
-        probs = softmax(logits, temp=0.01)
-        assert probs[1] > 0.999
+    def test_rejects_empty_logits(self):
+        with pytest.raises(ValueError):
+            softmax([])
 
-    def test_numerical_stability_with_large_positive_logits(self):
-        result = softmax([1000.0, 1001.0])
-        assert abs(sum(result) - 1.0) < 1e-9
-        assert all(0.0 <= p <= 1.0 for p in result)
 
-    def test_numerical_stability_with_large_negative_logits(self):
-        result = softmax([-1000.0, -999.0])
-        assert abs(sum(result) - 1.0) < 1e-9
-        assert all(0.0 <= p <= 1.0 for p in result)
+class TestWeightedMean:
+    def test_uniform_weights_give_arithmetic_mean(self):
+        assert weighted_mean([1.0, 2.0, 3.0], [1 / 3] * 3) == pytest.approx(2.0)
 
-    def test_default_temp_matches_temp_one(self):
-        logits = [1.0, 2.0, 3.0]
-        assert softmax(logits) == softmax(logits, temp=1.0)
+    def test_concentrated_weight_returns_that_point(self):
+        assert weighted_mean([1.0, 9.0], [0.0, 1.0]) == pytest.approx(9.0)
 
-    def test_five_element_vector(self):
-        logits = [0.0, 1.0, 2.0, 3.0, 4.0]
-        result = softmax(logits)
-        assert abs(sum(result) - 1.0) < 1e-9
-        assert len(result) == 5
-        # Probabilities should be strictly increasing
-        for i in range(len(result) - 1):
-            assert result[i] < result[i + 1]
+
+class TestEffectiveSampleSize:
+    def test_uniform_weights_give_full_n(self):
+        assert effective_sample_size([0.1] * 10) == pytest.approx(10.0)
+
+    def test_single_dominant_weight_gives_one(self):
+        assert effective_sample_size([1.0, 0.0, 0.0]) == pytest.approx(1.0)
+
+    def test_never_exceeds_n(self):
+        assert effective_sample_size([0.4, 0.3, 0.2, 0.1]) <= 4.0
 
 
 class TestSilvermanBandwidth:
-    def test_single_point_returns_default(self):
-        assert _silverman_bandwidth([5.0], [1.0]) == 1.0
+    def test_positive(self):
+        assert silverman_bandwidth([0.0, 1.0, 2.0], [1 / 3] * 3, 2.0) > 0
 
-    def test_empty_reservoir_returns_default(self):
-        # Fewer than 2 points triggers default path
-        assert _silverman_bandwidth([0.5], [1.0]) == 1.0
+    def test_floored_at_fraction_of_span(self):
+        # Identical points have zero variance; bandwidth must not collapse.
+        h = silverman_bandwidth([1.0] * 5, [0.2] * 5, span=10.0)
+        assert h == pytest.approx(MIN_BANDWIDTH_FRACTION * 10.0)
 
-    def test_returns_positive_value(self):
-        reservoir = [0.1, 0.5, 0.9]
-        weights   = [1 / 3, 1 / 3, 1 / 3]
-        assert _silverman_bandwidth(reservoir, weights) > 0
+    def test_never_exceeds_span(self):
+        assert silverman_bandwidth([-100.0, 100.0], [0.5, 0.5], span=1.0) <= 1.0
 
-    def test_wider_spread_gives_larger_bandwidth(self):
-        narrow = _silverman_bandwidth([0.4, 0.5, 0.6], [1 / 3, 1 / 3, 1 / 3])
-        wide   = _silverman_bandwidth([0.0, 0.5, 1.0], [1 / 3, 1 / 3, 1 / 3])
-        assert wide > narrow
+    def test_grows_with_spread(self):
+        tight = silverman_bandwidth([0.9, 1.0, 1.1], [1 / 3] * 3, 10.0)
+        wide = silverman_bandwidth([-5.0, 0.0, 5.0], [1 / 3] * 3, 10.0)
+        assert wide > tight
 
-    def test_identical_points_does_not_crash(self):
-        # Zero variance: w_var = 0 → sqrt(1e-12) guard applied
-        result = _silverman_bandwidth([0.5, 0.5, 0.5], [1 / 3, 1 / 3, 1 / 3])
-        assert result > 0
-
-    def test_heavily_skewed_weights_does_not_crash(self):
-        reservoir = [0.1, 0.5, 0.9]
-        weights   = [0.98, 0.01, 0.01]
-        result = _silverman_bandwidth(reservoir, weights)
-        assert result > 0
-
-    def test_larger_reservoir_gives_smaller_bandwidth_same_spread(self):
-        # More effective samples → Silverman rule gives smaller bandwidth
-        small = _silverman_bandwidth([0.0, 1.0], [0.5, 0.5])
-        large = _silverman_bandwidth(
-            [i / 9 for i in range(10)],
-            [0.1] * 10,
+    def test_single_point_returns_floor(self):
+        # Derived from the constant, not written out: a literal here pins the
+        # test to whatever the floor happened to be when it was written, so
+        # retuning the default fails a test that is not about the default.
+        assert silverman_bandwidth([1.0], [1.0], span=4.0) == pytest.approx(
+            MIN_BANDWIDTH_FRACTION * 4.0
         )
-        assert large < small
 
-    def test_returns_float(self):
-        result = _silverman_bandwidth([0.2, 0.8], [0.5, 0.5])
-        assert isinstance(result, float)
+
+class TestReflect:
+    def test_value_inside_is_unchanged(self):
+        assert reflect(0.5, 0.0, 1.0) == pytest.approx(0.5)
+
+    def test_overshoot_folds_back(self):
+        assert reflect(1.2, 0.0, 1.0) == pytest.approx(0.8)
+
+    def test_undershoot_folds_back(self):
+        assert reflect(-0.3, 0.0, 1.0) == pytest.approx(0.3)
+
+    def test_far_overshoot_stays_in_range(self):
+        for x in (-37.4, 91.2, 1e3):
+            assert 0.0 <= reflect(x, 0.0, 1.0) <= 1.0
+
+    def test_no_mass_pile_up_at_bounds(self):
+        # Clipping would map every overshoot onto the bound exactly;
+        # reflection must not.
+        assert reflect(1.5, 0.0, 1.0) != 1.0
+        assert reflect(-0.5, 0.0, 1.0) != 0.0
+
+    def test_degenerate_interval(self):
+        assert reflect(5.0, 2.0, 2.0) == 2.0
 
 
 class TestComputeTrialLoss:
-    def test_empty_deltas_returns_zero(self):
-        assert _compute_trial_loss([]) == 0.0
+    def test_empty_gives_zero(self):
+        assert compute_trial_loss([]) == 0.0
 
-    def test_single_delta_returned_unchanged(self):
-        assert _compute_trial_loss([0.5]) == 0.5
+    def test_mean_of_deltas(self):
+        assert compute_trial_loss([0.1, 0.3]) == pytest.approx(0.2)
 
-    def test_mean_of_three_deltas(self):
-        assert abs(_compute_trial_loss([0.2, 0.4, 0.6]) - 0.4) < 1e-9
 
-    def test_all_zero_deltas(self):
-        assert _compute_trial_loss([0.0, 0.0, 0.0]) == 0.0
+class TestIsFiniteNumber:
+    @pytest.mark.parametrize("value", [0, 1.5, -3, 1e300])
+    def test_accepts_finite_numbers(self, value):
+        assert is_finite_number(value)
 
-    def test_all_one_deltas(self):
-        assert abs(_compute_trial_loss([1.0, 1.0, 1.0]) - 1.0) < 1e-9
-
-    def test_single_zero(self):
-        assert _compute_trial_loss([0.0]) == 0.0
-
-    def test_returns_float(self):
-        result = _compute_trial_loss([0.3, 0.7])
-        assert isinstance(result, float)
+    @pytest.mark.parametrize(
+        "value", [float("nan"), float("inf"), float("-inf"), "1.0", None, True]
+    )
+    def test_rejects_everything_else(self, value):
+        assert not is_finite_number(value)

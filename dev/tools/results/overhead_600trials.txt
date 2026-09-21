@@ -1,0 +1,19 @@
+optimiser overhead: 600 trials, free objective
+
+optimiser                         1D            5D           20D
+----------------------------------------------------------------
+BUTChC                         14 us         52 us        193 us
+TPE (this repo)              1037 us       5219 us      21270 us
+Optuna TPESampler            1433 us       6789 us      27864 us
+
+relative to BUTChC (higher = slower)
+
+optimiser                         1D            5D           20D
+----------------------------------------------------------------
+BUTChC                          1.0x          1.0x          1.0x
+TPE (this repo)                73.2x        101.2x        110.4x
+Optuna TPESampler             101.1x        131.7x        144.7x
+
+Read this alongside sample efficiency, not instead of it: a method that
+spends longer choosing may still need fewer evaluations. It matters when the
+objective is cheap, and is close to irrelevant when a trial costs a model fit.
