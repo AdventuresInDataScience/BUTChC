@@ -1,222 +1,178 @@
-"""Tests for butchc._sampling: _sample_node, _traverse_sample."""
+"""Unit tests for butchc._sampling."""
+
 import random
+
 import pytest
 
-from butchc._tree import _initialize_prob_tree
-from butchc._sampling import _sample_node, _traverse_sample
+from butchc._sampling import sample_node, traverse_sample
+from butchc._tree import initialize_prob_tree
 
 
-# ---------------------------------------------------------------------------
-# Search-space fixtures
-# ---------------------------------------------------------------------------
+@pytest.fixture
+def rng():
+    return random.Random(0)
 
-SIMPLE_CAT = {'optimizer': {'values': ['adam', 'sgd', 'rmsprop']}}
-SIMPLE_CONT = {'lr': {'min': 0.001, 'max': 0.1}}
-NARROW_CONT = {'p': {'min': 0.49, 'max': 0.51}}
-
-HIERARCHICAL = {
-    'optimizer': {
-        'values': ['adam', 'sgd'],
-        'next_level': {
-            'adam': {'lr': {'min': 1e-4, 'max': 1e-2}},
-            'sgd':  {
-                'lr':       {'min': 1e-3, 'max': 1e-1},
-                'momentum': {'min': 0.0, 'max': 0.99},
-            },
-        },
-    },
-    'batch_size': {'values': [16, 32, 64]},
-}
-
-
-# ---------------------------------------------------------------------------
-# _sample_node — categorical
-# ---------------------------------------------------------------------------
 
 class TestSampleNodeCategorical:
-    def setup_method(self):
-        random.seed(0)
+    def test_returns_a_listed_value(self, rng):
+        node = initialize_prob_tree({"a": {"values": ["x", "y", "z"]}})["a"]
+        for _ in range(50):
+            external, internal = sample_node(node, 1.0, rng)
+            assert external in {"x", "y", "z"}
+            assert external == internal
 
-    def test_returns_valid_choice(self):
-        tree = _initialize_prob_tree(SIMPLE_CAT)
-        val  = _sample_node(tree['optimizer'], temp=1.0)
-        assert val in {'adam', 'sgd', 'rmsprop'}
+    def test_respects_learned_probabilities(self, rng):
+        node = initialize_prob_tree({"a": {"values": ["x", "y"]}})["a"]
+        node["prob"] = {"x": 0.99, "y": 0.01}
+        draws = [sample_node(node, 1.0, rng)[0] for _ in range(500)]
+        assert draws.count("x") > 400
 
-    def test_returns_string(self):
-        tree = _initialize_prob_tree(SIMPLE_CAT)
-        val  = _sample_node(tree['optimizer'], temp=1.0)
-        assert isinstance(val, str)
+    def test_low_temperature_sharpens(self, rng):
+        node = initialize_prob_tree({"a": {"values": ["x", "y"]}})["a"]
+        node["prob"] = {"x": 0.7, "y": 0.3}
+        greedy = [sample_node(node, 0.05, rng)[0] for _ in range(300)]
+        assert greedy.count("x") > 290
 
-    def test_never_returns_invalid_value(self):
-        tree = _initialize_prob_tree(SIMPLE_CAT)
-        node = tree['optimizer']
-        for _ in range(200):
-            assert _sample_node(node, temp=1.0) in {'adam', 'sgd', 'rmsprop'}
+    def test_high_temperature_flattens(self, rng):
+        node = initialize_prob_tree({"a": {"values": ["x", "y"]}})["a"]
+        node["prob"] = {"x": 0.95, "y": 0.05}
+        draws = [sample_node(node, 20.0, rng)[0] for _ in range(400)]
+        assert draws.count("y") > 100
 
-    def test_high_temp_samples_all_choices_eventually(self):
-        random.seed(0)
-        tree = _initialize_prob_tree(SIMPLE_CAT)
-        node = tree['optimizer']
-        seen = set()
-        for _ in range(500):
-            seen.add(_sample_node(node, temp=100.0))
-        assert seen == {'adam', 'sgd', 'rmsprop'}
-
-    def test_low_temp_concentrates_on_dominant_choice(self):
-        random.seed(0)
-        tree = _initialize_prob_tree(SIMPLE_CAT)
-        node = tree['optimizer']
-        # Bias heavily toward 'adam'
-        node['prob'] = {'adam': 0.98, 'sgd': 0.01, 'rmsprop': 0.01}
-        samples = [_sample_node(node, temp=0.01) for _ in range(200)]
-        assert samples.count('adam') > 190
-
-    def test_two_choice_node(self):
-        tree = _initialize_prob_tree({'x': {'values': ['yes', 'no']}})
-        for _ in range(100):
-            assert _sample_node(tree['x'], temp=1.0) in {'yes', 'no'}
-
-    def test_single_choice_always_returns_that_choice(self):
-        tree = _initialize_prob_tree({'x': {'values': ['only']}})
-        for _ in range(20):
-            assert _sample_node(tree['x'], temp=1.0) == 'only'
-
-
-# ---------------------------------------------------------------------------
-# _sample_node — continuous
-# ---------------------------------------------------------------------------
 
 class TestSampleNodeContinuous:
-    def setup_method(self):
-        random.seed(0)
+    def test_stays_within_bounds(self, rng):
+        node = initialize_prob_tree({"x": {"min": -2.0, "max": 3.0}})["x"]
+        for _ in range(500):
+            external, _ = sample_node(node, 1.0, rng)
+            assert -2.0 <= external <= 3.0
 
-    def test_returns_float(self):
-        tree = _initialize_prob_tree(SIMPLE_CONT)
-        val  = _sample_node(tree['lr'], temp=1.0)
-        assert isinstance(val, float)
+    def test_no_probability_mass_piles_on_bounds(self, rng):
+        # Clipping jitter would deposit atoms at min and max. Reflection
+        # must not: exact hits on either bound should be vanishingly rare.
+        node = initialize_prob_tree({"x": {"min": 0.0, "max": 1.0}})["x"]
+        draws = [sample_node(node, 1.0, rng)[0] for _ in range(3000)]
+        on_bound = sum(1 for v in draws if v in (0.0, 1.0))
+        assert on_bound / len(draws) < 0.01
 
-    def test_value_within_bounds(self):
-        tree = _initialize_prob_tree(SIMPLE_CONT)
-        node = tree['lr']
+    def test_concentrated_reservoir_produces_local_samples(self, rng):
+        node = initialize_prob_tree({"x": {"min": -10.0, "max": 10.0}})["x"]
+        node["reservoir"] = [4.0] * 10
+        node["weights"] = [0.1] * 10
+        node["scores"] = [1.0] * 10
+        draws = [sample_node(node, 1.0, rng)[0] for _ in range(300)]
+        assert all(abs(v - 4.0) < 2.0 for v in draws)
+
+    def test_log_node_returns_external_scale(self, rng):
+        node = initialize_prob_tree({"lr": {"min": 1e-5, "max": 1e-1, "log": True}})["lr"]
         for _ in range(200):
-            val = _sample_node(node, temp=1.0)
-            assert node['min'] <= val <= node['max']
+            external, internal = sample_node(node, 1.0, rng)
+            assert 1e-5 <= external <= 1e-1
+            assert -5.0 <= internal <= -1.0
 
-    def test_narrow_range_stays_within_bounds(self):
-        tree = _initialize_prob_tree(NARROW_CONT)
-        node = tree['p']
+    def test_int_node_returns_integers(self, rng):
+        node = initialize_prob_tree({"n": {"min": 1.0, "max": 6.0, "int": True}})["n"]
         for _ in range(200):
-            val = _sample_node(node, temp=1.0)
-            assert 0.49 <= val <= 0.51
+            external, _ = sample_node(node, 1.0, rng)
+            assert isinstance(external, int)
+            assert 1 <= external <= 6
 
-    def test_samples_cover_range(self):
-        # Over many draws, samples should spread across [min, max]
-        random.seed(42)
-        tree = _initialize_prob_tree({'x': {'min': 0.0, 'max': 1.0}})
-        node = tree['x']
-        samples = [_sample_node(node, temp=1.0) for _ in range(500)]
-        assert min(samples) < 0.1
-        assert max(samples) > 0.9
+    def test_int_internal_matches_emitted(self, rng):
+        node = initialize_prob_tree({"n": {"min": 1.0, "max": 6.0, "int": True}})["n"]
+        for _ in range(100):
+            external, internal = sample_node(node, 1.0, rng)
+            assert internal == pytest.approx(float(external))
 
 
-# ---------------------------------------------------------------------------
-# _sample_node — error handling
-# ---------------------------------------------------------------------------
+class TestExploration:
+    def test_explore_one_ignores_the_model(self, rng):
+        node = initialize_prob_tree({"a": {"values": ["x", "y"]}})["a"]
+        node["prob"] = {"x": 0.999, "y": 0.001}
+        draws = [sample_node(node, 1.0, rng, explore=1.0)[0] for _ in range(600)]
+        assert 200 < draws.count("y") < 400
 
-class TestSampleNodeErrors:
-    def test_malformed_node_raises_value_error(self):
+    def test_explore_one_covers_full_continuous_range(self, rng):
+        node = initialize_prob_tree({"x": {"min": 0.0, "max": 1.0}})["x"]
+        node["reservoir"] = [0.5] * 5
+        node["weights"] = [0.2] * 5
+        node["scores"] = [1.0] * 5
+        draws = [sample_node(node, 1.0, rng, explore=1.0)[0] for _ in range(400)]
+        assert min(draws) < 0.1 and max(draws) > 0.9
+
+    def test_explore_zero_uses_the_model(self, rng):
+        node = initialize_prob_tree({"a": {"values": ["x", "y"]}})["a"]
+        node["prob"] = {"x": 0.999, "y": 0.001}
+        draws = [sample_node(node, 1.0, rng, explore=0.0)[0] for _ in range(400)]
+        assert draws.count("y") < 20
+
+
+class TestMalformedNode:
+    def test_raises_with_helpful_message(self, rng):
         with pytest.raises(ValueError, match="Malformed node"):
-            _sample_node({'unknown_key': 42}, temp=1.0)
+            sample_node({"nonsense": 1}, 1.0, rng)
 
-    def test_empty_node_raises_value_error(self):
-        with pytest.raises(ValueError, match="Malformed node"):
-            _sample_node({}, temp=1.0)
-
-
-# ---------------------------------------------------------------------------
-# _traverse_sample
-# ---------------------------------------------------------------------------
 
 class TestTraverseSample:
-    def setup_method(self):
-        random.seed(42)
+    SPACE = {
+        "optimizer": {
+            "values": ["adam", "sgd"],
+            "next_level": {
+                "adam": {"beta1": {"min": 0.8, "max": 0.99}},
+                "sgd": {"momentum": {"min": 0.0, "max": 0.99}},
+            },
+        },
+        "batch_size": {"values": [16, 32]},
+    }
 
-    def test_flat_space_returns_all_params(self):
-        space = {
-            'lr':         {'min': 1e-4, 'max': 1e-1},
-            'batch_size': {'values': [16, 32, 64]},
-        }
-        tree   = _initialize_prob_tree(space)
-        config = _traverse_sample(tree, temp=1.0)
-        assert 'lr' in config
-        assert 'batch_size' in config
-
-    def test_flat_space_no_extra_keys(self):
-        space  = {'lr': {'min': 0.0, 'max': 1.0}, 'opt': {'values': ['a', 'b']}}
-        tree   = _initialize_prob_tree(space)
-        config = _traverse_sample(tree, temp=1.0)
-        assert set(config.keys()) == {'lr', 'opt'}
-
-    def test_continuous_value_in_bounds(self):
-        space  = {'x': {'min': 2.0, 'max': 5.0}}
-        tree   = _initialize_prob_tree(space)
-        for _ in range(100):
-            config = _traverse_sample(tree, temp=1.0)
-            assert 2.0 <= config['x'] <= 5.0
-
-    def test_categorical_value_in_choices(self):
-        tree = _initialize_prob_tree(SIMPLE_CAT)
+    def test_root_params_always_present(self, rng):
+        tree = initialize_prob_tree(self.SPACE)
         for _ in range(50):
-            config = _traverse_sample(tree, temp=1.0)
-            assert config['optimizer'] in {'adam', 'sgd', 'rmsprop'}
+            config, _ = traverse_sample(tree, 1.0, rng)
+            assert "optimizer" in config and "batch_size" in config
 
-    def test_hierarchical_adam_includes_lr(self):
-        tree = _initialize_prob_tree(HIERARCHICAL)
-        tree['optimizer']['prob'] = {'adam': 1.0, 'sgd': 0.0}
-        config = _traverse_sample(tree, temp=0.01)
-        assert config['optimizer'] == 'adam'
-        assert 'lr' in config
-        assert 'batch_size' in config
+    def test_only_the_chosen_branch_appears(self, rng):
+        tree = initialize_prob_tree(self.SPACE)
+        for _ in range(100):
+            config, _ = traverse_sample(tree, 1.0, rng)
+            if config["optimizer"] == "adam":
+                assert "beta1" in config and "momentum" not in config
+            else:
+                assert "momentum" in config and "beta1" not in config
 
-    def test_hierarchical_sgd_includes_momentum(self):
-        tree = _initialize_prob_tree(HIERARCHICAL)
-        tree['optimizer']['prob'] = {'adam': 0.0, 'sgd': 1.0}
-        config = _traverse_sample(tree, temp=0.01)
-        assert config['optimizer'] == 'sgd'
-        assert 'lr' in config
-        assert 'momentum' in config
+    def test_trace_mirrors_the_chosen_branch(self, rng):
+        tree = initialize_prob_tree(self.SPACE)
+        for _ in range(50):
+            config, trace = traverse_sample(tree, 1.0, rng)
+            assert trace["optimizer"]["internal"] == config["optimizer"]
+            assert set(trace["optimizer"]["sub"]) == (
+                {"beta1"} if config["optimizer"] == "adam" else {"momentum"}
+            )
 
-    def test_hierarchical_adam_excludes_momentum(self):
-        tree = _initialize_prob_tree(HIERARCHICAL)
-        tree['optimizer']['prob'] = {'adam': 1.0, 'sgd': 0.0}
-        config = _traverse_sample(tree, temp=0.01)
-        assert 'momentum' not in config
+    def test_trace_leaf_has_no_sub(self, rng):
+        tree = initialize_prob_tree(self.SPACE)
+        _, trace = traverse_sample(tree, 1.0, rng)
+        assert trace["batch_size"]["sub"] is None
 
-    def test_hierarchical_sgd_excludes_adam_only_params(self):
-        # adam has no extra params in this fixture, but sgd should not leak
-        tree = _initialize_prob_tree(HIERARCHICAL)
-        tree['optimizer']['prob'] = {'adam': 0.0, 'sgd': 1.0}
-        config = _traverse_sample(tree, temp=0.01)
-        # Only sgd sub-params should be present
-        assert set(config.keys()) == {'optimizer', 'lr', 'momentum', 'batch_size'}
+    def test_trace_stores_internal_coordinates(self, rng):
+        tree = initialize_prob_tree({"lr": {"min": 1e-4, "max": 1e-1, "log": True}})
+        config, trace = traverse_sample(tree, 1.0, rng)
+        assert trace["lr"]["internal"] == pytest.approx(
+            __import__("math").log10(config["lr"])
+        )
 
-    def test_hierarchical_batch_size_always_present(self):
-        tree = _initialize_prob_tree(HIERARCHICAL)
-        for _ in range(30):
-            config = _traverse_sample(tree, temp=1.0)
-            assert 'batch_size' in config
-
-    def test_hierarchical_batch_size_valid(self):
-        tree = _initialize_prob_tree(HIERARCHICAL)
-        for _ in range(30):
-            config = _traverse_sample(tree, temp=1.0)
-            assert config['batch_size'] in {16, 32, 64}
-
-    def test_empty_tree_returns_empty_config(self):
-        config = _traverse_sample({}, temp=1.0)
-        assert config == {}
-
-    def test_returns_dict(self):
-        tree   = _initialize_prob_tree(SIMPLE_CAT)
-        config = _traverse_sample(tree, temp=1.0)
-        assert isinstance(config, dict)
+    def test_deep_nesting_resolves(self, rng):
+        space = {
+            "model": {
+                "values": ["nn"],
+                "next_level": {
+                    "nn": {
+                        "arch": {
+                            "values": ["cnn"],
+                            "next_level": {"cnn": {"k": {"values": [3, 5]}}},
+                        }
+                    }
+                },
+            }
+        }
+        config, _ = traverse_sample(initialize_prob_tree(space), 1.0, rng)
+        assert config["model"] == "nn" and config["arch"] == "cnn" and config["k"] in (3, 5)

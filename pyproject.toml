@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "butchc"
-version = "0.1.0"
+version = "0.6.0"
 description = "Bayesian Update Tree Chained Conditionally — a dependency-free probabilistic black-box hyperparameter optimizer"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -31,9 +31,13 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
+[project.optional-dependencies]
+test = ["pytest>=7"]
+configspace = ["ConfigSpace>=0.6"]
+
 [project.urls]
-Homepage = "https://github.com/malhar/BUTChC"
-Repository = "https://github.com/malhar/BUTChC"
+Homepage = "https://github.com/AdventuresInDataScience/BUTChC"
+Repository = "https://github.com/AdventuresInDataScience/BUTChC"
 
 [tool.setuptools.packages.find]
 include = ["butchc*"]

@@ -1,0 +1,47 @@
+
+TUNED ON (optimistic)
+(higher is better, optimum 0; n = paired seeds)
+
+problem              budget       random          tpe       butchc
+------------------------------------------------------------------
+2D quadratic            200      -0.0425      -0.0004      -0.0000
+5D sphere               500      -3.7393      -0.1312      -0.0000
+Rosenbrock              500      -0.1036      -0.0202      -0.0368
+Rastrigin 4D            600     -17.5005      -8.6510      -5.1169
+10D sphere             1000     -19.0750      -2.2176      -0.0036
+Ackley 5D               600     -14.1027      -4.3008      -0.0323
+Log-scale target        200      -0.0085      -0.0006      -0.0000
+Branch trap             300      -0.6219      -1.0004      -0.0189
+Categorical mix         300      -0.3226      -0.0680      -0.0004
+Integer mix             300      -0.2727      -0.0016      -0.0000
+Plateau (ties)          300      -0.5000      -0.5000      -0.5000
+
+butchc head-to-head (win-loss, two-sided sign test)
+
+problem                          vs random                vs tpe
+----------------------------------------------------------------
+2D quadratic                30-0   p=0.000        30-0   p=0.000
+5D sphere                   30-0   p=0.000        29-1   p=0.000
+Rosenbrock                 19-11   p=0.200       13-17   p=0.585
+Rastrigin 4D                29-1   p=0.000        26-4   p=0.000
+10D sphere                  30-0   p=0.000        30-0   p=0.000
+Ackley 5D                   30-0   p=0.000        30-0   p=0.000
+Log-scale target            30-0   p=0.000        29-1   p=0.000
+Branch trap                 24-6   p=0.001        25-5   p=0.000
+Categorical mix             30-0   p=0.000        28-2   p=0.000
+Integer mix                 30-0   p=0.000        26-4   p=0.000
+Plateau (ties)               0-0   p=1.000         0-0   p=1.000
+
+
+UNDER OBSERVATION NOISE — true value of the reported best
+(higher is better, optimum 0; n = paired seeds)
+
+problem              budget       random          tpe       butchc
+------------------------------------------------------------------
+Noisy 5D sphere         400      -4.8604      -0.8099      -0.4490
+
+butchc head-to-head (win-loss, two-sided sign test)
+
+problem                          vs random                vs tpe
+----------------------------------------------------------------
+Noisy 5D sphere             30-0   p=0.000       19-11   p=0.200

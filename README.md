@@ -2,558 +2,382 @@
 
 **B**ayesian **U**pdate **T**ree **Ch**ained **C**onditionally — a dependency-free, probabilistic black-box hyperparameter optimizer.
 
-BUTChC maintains a probability distribution over a **hierarchical, conditional search space** and iteratively refines it based on observed objective values. The key idea: parameters can be conditional on the choices made higher up the tree — `momentum` only exists when `optimizer=sgd`; `kernel_size` only exists when `model=cnn`. This means the optimizer never wastes trials sampling irrelevant combinations, and learns each branch's parameters independently.
+BUTChC maintains a probability distribution over a **hierarchical, conditional search space** and refines it from observed objective values. Parameters can depend on choices made higher up the tree: `momentum` exists only when `optimizer=sgd`, `kernel_size` only when `model=cnn`. Invalid combinations are unreachable by construction rather than discovered by trial, and each branch learns its own parameters from only the trials that used it.
 
-It requires no gradients, no differentiability, and makes no assumptions about the objective function's internals.
+No gradients, no differentiability, no assumptions about the objective's internals.
+
+- **Zero dependencies** — Python ≥ 3.8 standard library only
+- **Conditional search spaces** — nested arbitrarily deep via `next_level`
+- **Non-parametric continuous model** — a weighted KDE elite archive, no distributional assumptions
+- **Scale-invariant** — updates use rank, not raw objective, so an objective in the millions behaves like one in `[0, 1]`
+- **Parallel evaluation** — bring your own executor; threads, processes, joblib, dask
+- **Reproducible** — `seed` gives a private RNG, and the answer does not depend on which worker finishes first
+- **Fails fast** — search spaces and hyperparameters are validated before the first objective call
+- **Prunable** — `prune` turns a finished run into a smaller space, to search again or hand to another optimiser
+
+Against TPE across 18 benchmark problems at 30 paired seeds: **13 significant wins, zero significant losses**, at **73–145× lower per-trial cost**.
+
+📖 **[API reference](docs/api.md)** · **[Examples](docs/examples.md)** · **[Design notes](docs/design.md)** · **[Limitations](docs/limitations.md)** · **[Codemap](docs/codemap.md)** · **[Changelog](CHANGELOG.md)**
 
 ---
 
-## Features
+## Install
 
-- **Zero dependencies** — pure Python standard library, nothing to install beyond the package itself
-- **Hierarchical search spaces** — parameters can be conditional on parent choices (`optimizer=adam` unlocks `beta1`; `optimizer=sgd` unlocks `momentum`)
-- **Non-parametric continuous modelling** — weighted KDE reservoir, no distributional assumptions, naturally handles multimodality
-- **Warm-startable** — chain runs, resume interrupted optimizations, or seed from prior knowledge
-- **Built-in convergence signal** — per-trial loss metric tracks model surprise; use it for early stopping
-- **Interpretable** — the probability tree is human-readable after training
-
----
-
-## Installation
-
-**From source (recommended):**
 ```bash
-git clone https://github.com/AdventuresInDataScience/BUTChC.git
-cd BUTChC
-pip install .
+pip install .                      # from a checkout
+pip install .[configspace]         # + ConfigSpace interop (optional)
 ```
 
-**Editable install for development:**
-```bash
-pip install -e .
-```
+Run the tests:
 
-**Requirements:** Python ≥ 3.8, no external dependencies.
-
-**Run the test suite:**
 ```bash
-pip install pytest
-pytest
+pip install pytest && pytest
 ```
 
 ---
 
-## Quick Start
-
-Three model types, each with their own set of hyperparameters. BUTChC only ever samples and updates parameters that are relevant to the model chosen in a given trial.
+## Quick start
 
 ```python
 from butchc import BUTChC_optimize
 
 searchspace = {
-    # Top-level choice: which model family to use.
-    # Each choice unlocks its own set of sub-parameters via 'next_level'.
+    # Top-level choice of model family. Each choice unlocks its own
+    # sub-parameters via 'next_level'.
     'model_type': {
         'values': ['svm', 'random_forest', 'neural_net'],
         'next_level': {
             'svm': {
-                # These params are ONLY sampled when model_type == 'svm'
                 'kernel': {'values': ['rbf', 'linear', 'poly']},
-                'C':      {'min': 0.01, 'max': 100.0},
-                'gamma':  {'min': 1e-4, 'max': 10.0},
+                'C':      {'min': 0.01, 'max': 100.0, 'log': True},
+                'gamma':  {'min': 1e-4, 'max': 10.0,  'log': True},
             },
             'random_forest': {
-                # These params are ONLY sampled when model_type == 'random_forest'
                 'n_estimators': {'values': [50, 100, 200, 500]},
-                'max_depth':    {'min': 2.0, 'max': 30.0},
+                'max_depth':    {'min': 2, 'max': 30, 'int': True},
                 'max_features': {'values': ['sqrt', 'log2']},
             },
             'neural_net': {
-                # These params are ONLY sampled when model_type == 'neural_net'
-                'learning_rate': {'min': 1e-4, 'max': 1e-1},
+                'learning_rate': {'min': 1e-4, 'max': 1e-1, 'log': True},
                 'hidden_units':  {'values': [64, 128, 256, 512]},
                 'dropout':       {'min': 0.0, 'max': 0.5},
             },
         },
     },
-    # This param is always present, regardless of model_type
+    # Always present, whatever model_type is chosen
     'preprocessing': {'values': ['standard_scaler', 'min_max', 'none']},
 }
 
 def objective(config):
-    # config always contains 'model_type' and 'preprocessing',
-    # PLUS only the params for whichever model was chosen. For example:
-    #   {'model_type': 'svm', 'kernel': 'rbf', 'C': 4.2, 'gamma': 0.01, 'preprocessing': 'standard_scaler'}
-    #   {'model_type': 'neural_net', 'learning_rate': 0.003, 'hidden_units': 128, 'dropout': 0.2, 'preprocessing': 'none'}
-    # 'momentum' will never appear here; 'C' will never appear in a neural_net config.
-    model = build_model(config)
-    return model.cross_val_score(X, y)   # higher = better
+    # config carries 'model_type' and 'preprocessing', plus only the params
+    # of the chosen branch, e.g.
+    #   {'model_type': 'svm', 'kernel': 'rbf', 'C': 4.2, 'gamma': 0.01, ...}
+    # 'dropout' never appears in an svm config; 'C' never in a neural_net one.
+    return cross_val_score(build_model(config), X, y).mean()   # higher is better
 
 results = BUTChC_optimize(
     searchspace = searchspace,
     objective   = objective,
     budget      = 150,
-    lambda_     = 1.0,
-    alpha       = 1.0,
-    verbose     = True,
+    seed        = 0,
 )
 
 print(results['best_params'])
-# e.g. {'model_type': 'neural_net', 'learning_rate': 0.0031,
-#        'hidden_units': 256, 'dropout': 0.15, 'preprocessing': 'standard_scaler'}
 print(f"Best score: {results['best_value']:.4f}")
 ```
 
----
+BUTChC always **maximizes**. Negate to minimize.
 
-## Examples
-
-### 1. Finding the peak of a mathematical function
+### Slow objective? Use an executor
 
 ```python
-from butchc import BUTChC_optimize
+from concurrent.futures import ThreadPoolExecutor
 
-# Maximize -(x-2)^2 - (y+1)^2; global peak at (x=2, y=-1)
-def objective(config):
-    x, y = config['x'], config['y']
-    return -((x - 2.0) ** 2) - ((y + 1.0) ** 2)
+with ThreadPoolExecutor(max_workers=8) as pool:
+    results = BUTChC_optimize(searchspace, objective, budget=200,
+                              batch=8, executor=pool, seed=0)
+```
 
-searchspace = {
-    'x': {'min': -5.0, 'max': 5.0},
-    'y': {'min': -5.0, 'max': 5.0},
-}
+### Already have a ConfigSpace?
 
-results = BUTChC_optimize(
-    searchspace, objective,
-    budget=200, lambda_=1.5, alpha=1.0,
-    verbose=False,
-)
-
-print(f"x = {results['best_params']['x']:.3f}  (target: 2.0)")
-print(f"y = {results['best_params']['y']:.3f}  (target: -1.0)")
-print(f"Best value: {results['best_value']:.4f}  (target: 0.0)")
+```python
+results = BUTChC_optimize(configuration_space, objective, budget=200, seed=0)
 ```
 
 ---
 
-### 2. Neural network optimizer tuning with conditional sub-parameters
+## Defining a search space
 
-`adam` and `sgd` have completely different tuning knobs. With `next_level`, BUTChC learns each optimizer's best parameters from only the trials that used that optimizer — no cross-contamination.
-
-```python
-from butchc import BUTChC_optimize
-
-searchspace = {
-    'optimizer': {
-        'values': ['adam', 'sgd'],
-        'next_level': {
-            'adam': {
-                # Adam-specific: lr range tuned for Adam, plus its beta1 moment
-                'lr':    {'min': 1e-4, 'max': 1e-1},
-                'beta1': {'values': [0.85, 0.90, 0.95, 0.99]},
-            },
-            'sgd': {
-                # SGD-specific: different lr range + momentum (meaningless for Adam)
-                'lr':       {'min': 1e-3, 'max': 1e-1},
-                'momentum': {'min': 0.0, 'max': 0.99},
-            },
-        },
-    },
-    # These appear in every config regardless of optimizer
-    'batch_size': {'values': [16, 32, 64, 128]},
-    'dropout':    {'min': 0.0, 'max': 0.5},
-}
-
-def train_and_evaluate(config):
-    # Possible config shapes:
-    #   {'optimizer': 'adam',  'lr': 0.001, 'beta1': 0.95, 'batch_size': 64, 'dropout': 0.2}
-    #   {'optimizer': 'sgd',   'lr': 0.01,  'momentum': 0.9, 'batch_size': 32, 'dropout': 0.1}
-    # 'momentum' will NEVER appear in an adam config; 'beta1' will NEVER appear in an sgd config.
-    model = build_and_train(config)
-    return evaluate(model)   # return validation accuracy (higher = better)
-
-results = BUTChC_optimize(
-    searchspace, train_and_evaluate,
-    budget=200, lambda_=1.0, alpha=1.0, temp=1.2,
-    verbose=True,
-)
-print(results['best_params'])
-
-
----
-
-### 3. Minimization (negate the objective)
-
-BUTChC always maximizes. To minimize, negate:
+A search space is a plain dict — JSON-serializable, and no imports needed to write one.
 
 ```python
-from butchc import BUTChC_optimize
-
-# Minimize the Rosenbrock function: f(x,y) = (1-x)^2 + 100*(y-x^2)^2
-# True minimum is 0 at (x=1, y=1).
-def rosenbrock(config):
-    x, y = config['x'], config['y']
-    return -((1 - x) ** 2 + 100 * (y - x ** 2) ** 2)  # negate to maximize
-
-searchspace = {
-    'x': {'min': -2.0, 'max': 2.0},
-    'y': {'min': -1.0, 'max': 3.0},
-}
-
-results = BUTChC_optimize(
-    searchspace, rosenbrock,
-    budget=500, lambda_=2.0, alpha=1.0,
-    verbose=False,
-)
-
-print(f"x = {results['best_params']['x']:.3f}  (target: 1.0)")
-print(f"y = {results['best_params']['y']:.3f}  (target: 1.0)")
-print(f"Minimum found: {-results['best_value']:.4f}  (target: 0.0)")
+'activation':    {'values': ['relu', 'tanh', 'elu']}        # categorical
+'dropout':       {'min': 0.0,  'max': 0.5}                  # linear
+'learning_rate': {'min': 1e-5, 'max': 1e-1, 'log': True}    # log10-uniform
+'n_layers':      {'min': 1,    'max': 6,    'int': True}    # integer-valued
 ```
 
----
+Use `log: True` whenever the range spans more than about one order of magnitude. Sampled linearly, `[1e-5, 1e-1]` places 99.99% of its mass above `1e-3`, leaving the bottom three decades effectively unreachable.
 
-### 4. Warm starting — chaining runs
-
-Pass the `prob_tree` from one run as the `start_prob_tree` of the next. The second run picks up exactly where the first left off.
-
-```python
-from butchc import BUTChC_optimize
-
-searchspace = {'x': {'min': -5.0, 'max': 5.0}, 'method': {'values': ['a', 'b']}}
-
-def objective(config):
-    return -(config['x'] ** 2)
-
-# First run: explore broadly
-results1 = BUTChC_optimize(
-    searchspace, objective,
-    budget=100, lambda_=1.0, alpha=1.0,
-    verbose=False,
-)
-
-# Second run: continue from the learned distribution
-results2 = BUTChC_optimize(
-    searchspace, objective,
-    budget=100, lambda_=0.5, alpha=1.0,   # lower lambda_ for finer refinement
-    start_prob_tree=results1['prob_tree'],
-    verbose=False,
-)
-
-print(f"After 200 total trials: best x = {results2['best_params']['x']:.3f}")
-```
-
----
-
-### 5. Passing extra arguments to the objective
-
-Keyword arguments not consumed by `BUTChC_optimize` are forwarded to your objective.
-
-```python
-from butchc import BUTChC_optimize
-
-def objective(config, X_train, y_train, X_val, y_val):
-    model = build_model(config)
-    model.fit(X_train, y_train)
-    return model.score(X_val, y_val)
-
-results = BUTChC_optimize(
-    searchspace, objective,
-    budget=100, lambda_=1.0, alpha=1.0,
-    verbose=False,
-    # These are forwarded directly to objective():
-    X_train=X_train, y_train=y_train,
-    X_val=X_val,     y_val=y_val,
-)
-```
-
----
-
-### 6. Monitoring convergence
-
-The `loss_history` and `rolling_loss` fields track how much the model updates each trial. Declining rolling loss = the distribution is settling.
-
-```python
-from butchc import BUTChC_optimize
-
-results = BUTChC_optimize(
-    searchspace, objective,
-    budget=500, lambda_=1.0, alpha=1.0,
-    verbose=False,
-)
-
-# Inspect raw losses
-print("Final 10 losses:", results['loss_history'][-10:])
-print("Final rolling loss:", results['rolling_loss'][-1])
-
-# Early-stopping heuristic: stop when rolling loss < threshold
-THRESHOLD = 1e-4
-for i, rl in enumerate(results['rolling_loss']):
-    if rl < THRESHOLD:
-        print(f"Converged at trial {i + 1}")
-        break
-
-# Plot with matplotlib (optional)
-try:
-    import matplotlib.pyplot as plt
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-
-    ax1.plot(results['loss_history'],  alpha=0.4, label='Trial loss')
-    ax1.plot(results['rolling_loss'],  label='Rolling mean')
-    ax1.set_xlabel('Trial'); ax1.set_ylabel('Loss'); ax1.legend()
-    ax1.set_title('Convergence')
-
-    running_best, best_curve = -float('inf'), []
-    for h in results['history']:
-        running_best = max(running_best, h['objective'])
-        best_curve.append(running_best)
-    ax2.plot(best_curve)
-    ax2.set_xlabel('Trial'); ax2.set_ylabel('Best objective')
-    ax2.set_title('Optimization progress')
-
-    plt.tight_layout(); plt.show()
-except ImportError:
-    pass  # matplotlib is optional
-```
-
----
-
-### 7. Reading the learned probability tree
-
-After optimization, you can inspect what the model learned:
-
-```python
-results = BUTChC_optimize(...)
-tree = results['prob_tree']
-
-# Categorical probabilities
-print("Optimizer probabilities:", tree['optimizer']['prob'])
-# e.g. {'adam': 0.73, 'sgd': 0.27}
-
-# The model has learned adam is better 73% of the time
-
-# Continuous: look at weighted mean of the reservoir
-opt_subtree = tree['optimizer']['next_level']['adam']
-lr_node     = opt_subtree['lr']
-weighted_mean = sum(w * x for w, x in zip(lr_node['weights'], lr_node['reservoir']))
-print(f"Learned centre of lr distribution: {weighted_mean:.5f}")
-```
-
----
-
-## API Reference
-
-### `BUTChC_optimize`
-
-```python
-from butchc import BUTChC_optimize
-
-results = BUTChC_optimize(
-    searchspace,
-    objective,
-    budget,
-    lambda_,
-    alpha,
-    temp            = 1.0,
-    start_prob_tree = None,
-    verbose         = True,
-    **kwargs,        # forwarded to objective
-)
-```
-
-#### Parameters
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `searchspace` | `dict` | — | Search space definition (see below) |
-| `objective` | `callable` | — | `(config, **kwargs) → float`. Higher return value = better. |
-| `budget` | `int` | — | Number of objective evaluations |
-| `lambda_` | `float` | — | Initial update weight. Higher = faster adaptation, more risk of premature convergence. Start with `1.0`. |
-| `alpha` | `float` | — | Laplace smoothing for categorical nodes. Higher = distribution stays flat longer. Start with `1.0`. |
-| `temp` | `float` | `1.0` | Softmax temperature for categorical sampling. `>1` explores more, `<1` exploits more. |
-| `start_prob_tree` | `dict \| None` | `None` | Warm-start from a previous run's `prob_tree`. |
-| `verbose` | `bool` | `True` | Print per-trial progress to stdout. |
-| `**kwargs` | | | Forwarded to every call of `objective`. |
-
-#### Return value
-
-```python
-{
-    'best_params':  dict,    # Config that achieved the highest objective
-    'best_value':   float,   # Corresponding objective value
-    'prob_tree':    dict,    # Final probability tree — pass to start_prob_tree to warm-start
-    'history':      list,    # Per-trial: {'params': ..., 'objective': ..., 'loss': ..., 'rolling_loss': ...}
-    'loss_history': list,    # Per-trial loss values (convenience copy)
-    'rolling_loss': list,    # Per-trial rolling mean loss (convenience copy)
-}
-```
-
----
-
-## Defining the Search Space
-
-### The two node types
-
-Every parameter in the search space is one of two forms:
-
-**Categorical** — pick one value from a fixed list:
-```python
-'activation': {'values': ['relu', 'tanh', 'elu']}
-```
-
-**Continuous** — sample a float from `[min, max]` using a non-parametric KDE:
-```python
-'learning_rate': {'min': 1e-5, 'max': 1e-1}
-```
-
-For integer-valued parameters, use continuous and round in your objective:
-```python
-'n_layers': {'min': 1.0, 'max': 6.0}
-# In your objective: n = round(config['n_layers'])
-```
-
----
-
-### Conditional parameters with `next_level`
-
-This is the core feature of BUTChC. A categorical node can carry a `next_level` dict that maps each choice to a sub-searchspace. Parameters defined inside `next_level` are **only ever sampled and updated** when their parent value was chosen.
-
-```python
-'optimizer': {
-    'values': ['adam', 'sgd'],
-    'next_level': {
-        'adam': {
-            # Only active when optimizer == 'adam'
-            'lr':    {'min': 1e-4, 'max': 1e-2},
-            'beta1': {'values': [0.9, 0.95, 0.99]},
-        },
-        'sgd': {
-            # Only active when optimizer == 'sgd'
-            'lr':       {'min': 1e-3, 'max': 1e-1},
-            'momentum': {'min': 0.0, 'max': 0.99},
-        },
-    },
-}
-```
-
-When `optimizer=adam` is sampled, the returned config contains `lr` and `beta1` but **never** `momentum`. When `optimizer=sgd` is sampled, it contains `lr` and `momentum` but **never** `beta1`. The probability model for each branch is updated entirely independently — learning the best `lr` for adam does not interfere with learning the best `lr` for sgd, even though they share the same parameter name.
-
-**Why this matters:** Without conditional parameters, you'd have to put `momentum` in the flat space and hope the optimizer figures out to ignore it for adam. With `next_level`, the structure is explicit, no budget is wasted on invalid combinations, and the model learns each branch's parameters from only the trials that actually used that branch.
-
----
-
-### Parameters without `next_level` are always active
-
-Any parameter defined at the root level (outside any `next_level`) appears in **every** config, regardless of what was chosen elsewhere:
-
-```python
-searchspace = {
-    'optimizer': {
-        'values': ['adam', 'sgd'],
-        'next_level': { ... },
-    },
-    'batch_size': {'values': [16, 32, 64]},   # always present
-    'dropout':    {'min': 0.0, 'max': 0.5},   # always present
-}
-# Every config will have 'optimizer', 'batch_size', 'dropout',
-# plus whichever sub-params belong to the chosen optimizer.
-```
-
----
-
-### `next_level` doesn't have to cover every choice
-
-If a choice has no sub-parameters, just omit it from `next_level`. You can also omit `next_level` entirely for a plain categorical node:
+A categorical node can map each of its choices to a sub-searchspace via `next_level`. Those parameters are sampled and updated only when their parent value is chosen:
 
 ```python
 'optimizer': {
     'values': ['adam', 'sgd', 'lbfgs'],
     'next_level': {
-        'adam': {'lr': {'min': 1e-4, 'max': 1e-1}},
-        'sgd':  {'lr': {'min': 1e-3, 'max': 1e-1}, 'momentum': {'min': 0.0, 'max': 0.99}},
-        # 'lbfgs' is not listed — it has no sub-params, and that's fine
+        'adam': {'lr': {'min': 1e-4, 'max': 1e-2, 'log': True}},
+        'sgd':  {'lr':       {'min': 1e-3, 'max': 1e-1, 'log': True},
+                 'momentum': {'min': 0.0,  'max': 0.99}},
+        # 'lbfgs' takes no sub-params — omitting it is fine
     },
 }
 ```
 
----
+Each branch keeps its own model, so learning the best `lr` for adam does not interfere with learning the best `lr` for sgd. `next_level` is the only nesting mechanism and it composes, so nesting is arbitrarily deep — [a worked four-level space](docs/examples.md#nesting-more-than-one-level) shows how.
 
-### Nesting can go multiple levels deep
+This is also how you express an invalid combination. "`penalty=elasticnet` only works with `solver=saga`" becomes a `solver` node whose branches carry different `penalty` values — the invalid pairing is then unreachable, and no budget is spent finding that out. Constraints that cross the tree rather than nest are the exception; see [limitations](docs/limitations.md#search-spaces-butchc-cannot-express).
 
-Sub-parameters can themselves be categorical nodes with their own `next_level`, creating arbitrary depth:
-
-```python
-searchspace = {
-    'model': {
-        'values': ['linear', 'neural_net'],
-        'next_level': {
-            'linear': {
-                'regularizer': {
-                    'values': ['l1', 'l2', 'elasticnet'],
-                    'next_level': {
-                        'l1':         {'C': {'min': 0.001, 'max': 10.0}},
-                        'l2':         {'C': {'min': 0.001, 'max': 10.0}},
-                        'elasticnet': {'C': {'min': 0.001, 'max': 10.0},
-                                       'l1_ratio': {'min': 0.0, 'max': 1.0}},
-                    },
-                },
-            },
-            'neural_net': {
-                'architecture': {
-                    'values': ['mlp', 'cnn'],
-                    'next_level': {
-                        'mlp': {'hidden_units': {'values': [64, 128, 256]},
-                                'dropout': {'min': 0.0, 'max': 0.5}},
-                        'cnn': {'n_filters': {'values': [32, 64, 128]},
-                                'kernel_size': {'values': [3, 5, 7]}},
-                    },
-                },
-                'learning_rate': {'min': 1e-4, 'max': 1e-1},
-            },
-        },
-    },
-    'epochs': {'min': 10.0, 'max': 100.0},   # always present
-}
-```
-
-A trial that picks `model=neural_net, architecture=cnn` will produce a config containing `model`, `architecture`, `n_filters`, `kernel_size`, `learning_rate`, and `epochs` — nothing else. The `hidden_units`, `dropout`, `C`, and `l1_ratio` nodes are untouched.
+Any node can carry a `prior` and a `prior_strength` measured in pseudo-trials. See the [API reference](docs/api.md#search-space-format) for the full format, priors, and the uniqueness rule for names.
 
 ---
 
-## Tuning Guide
+## How it works
+
+1. **Initialize** a probability tree from the search space. Categorical nodes start uniform; continuous nodes start with an evenly spaced reservoir covering the range.
+
+2. **Sample** by traversing the tree. Categorical nodes draw from a temperature-scaled softmax. Continuous nodes pick a reservoir point weighted by its rank, add Silverman-bandwidth Gaussian jitter, and *reflect* back into range.
+
+3. **Evaluate** the objective.
+
+4. **Rank** the result against every finite objective seen so far, counting ties as half. Continuous nodes apply the `gamma` gate and convert what survives into a `quality` in `[0, 1]`; categorical nodes use the raw rank, ungated.
+
+5. **Update**. Categorical nodes score each choice by its recency-weighted mean rank, smoothed by `alpha` pseudo-visits. Continuous nodes append to an elite archive, evict the worst-scoring entry, and reweight geometrically by rank.
+
+6. **Repeat**, with categorical commitment ramping up over the budget.
+
+Two properties are load-bearing. **Reflection rather than clipping**: jitter clipped to `[min, max]` deposits probability mass on each bound and biases every search toward interval edges. **Rank rather than raw objective**: raw-value weighting makes behaviour depend on units, and one catastrophic outlier could dominate the archive permanently.
+
+Full reasoning in [design notes](docs/design.md).
+
+---
+
+## Tuning
 
 | Parameter | Start | Increase if… | Decrease if… |
 |---|---|---|---|
-| `lambda_` | `1.0` | tree updates slowly / flat | converging too fast to suboptimal |
-| `alpha` | `1.0` | too many categorical options, small budget | want to commit faster to early observations |
-| `temp` | `1.0` | categorical exploration too greedy | spending budget on clearly bad choices |
-| `budget` | 10× param count | rolling loss hasn't plateaued | rolling loss is zero after 20% of run |
+| `lambda_` | `2.0` | tree adapts too slowly | converging too fast to a suboptimal region |
+| `alpha` | `3.0` | many categorical options, small budget | want faster commitment to early evidence |
+| `temp` | `1.0` | categorical exploration too greedy | budget spent on clearly bad choices |
+| `gamma` | `0.85` | objective is noisy; want only strong trials to count | want more trials contributing signal |
+| `explore` | `0.05` | search collapses to a local optimum early | objective is expensive and smooth |
+| `batch` | `1` | you have idle workers | you have no executor |
+| `budget` | 10× param count | rolling loss has not plateaued | rolling loss flat after 20% of the run |
 
-**Rule of thumb:** `λ` and `α` interact. High `λ` + low `α` commits quickly. Low `λ` + high `α` keeps the distribution flat. Tune them together.
+`lambda_` and `alpha` act on different node types and do not interact: `lambda_` controls how sharply continuous archives concentrate, `alpha` how slowly categorical nodes commit. Note `lambda_` saturates — it acts only through `min(RANK_SHARPNESS * lambda_, MAX_SHARPNESS)`, so any value at or above 3.33 is clipped and does nothing. See [api.md](docs/api.md#butchc_optimize).
 
----
+The two knobs most worth reaching for are not in this table. `KDE_RESERVOIR_SIZE` (default 25) and `MIN_BANDWIDTH_FRACTION` (default 0.0003) between them decide how hard the continuous model concentrates, and they carry more of the measured gain than anything else. They interact, so retune them together: a **smooth, high-dimensional** space wants the gentler pair (`50` and `0.001`), while conditional and multimodal spaces want the sharp defaults.
 
-## How It Works
+### Tuning for your problem's shape
 
-1. **Initialize** a probability tree from the search space. Categorical nodes start uniform. Continuous nodes start with an evenly-spaced KDE reservoir covering `[min, max]`.
-2. **Sample** a configuration by traversing the tree top-to-bottom. Categorical nodes use temperature-scaled softmax. Continuous nodes use a weighted KDE draw with Silverman-bandwidth Gaussian jitter, clipped to `[min, max]`.
-3. **Evaluate** the objective on the sampled configuration.
-4. **Update** the tree. Categorical nodes: Laplace-smoothed count increment. Continuous nodes: append the new observation to the reservoir, prune the lowest-weight point if over capacity, renormalize weights.
-5. **Decay** both the update weight (`λ`) and the update probability (`β`) exponentially with `τ = budget`, so the tree stabilizes naturally by the final trial.
-6. **Repeat** for `budget` trials.
+The defaults are an average over problem shapes. `benchmarks/tune.py --regime` sweeps against problems sharing one property and prints what that shape wants: `branched` spaces want faster commitment, `noisy` ones want `explore 0.1`, `multimodal` ones want a smaller reservoir. The table is in [docs/api.md](docs/api.md#tuning-by-problem-shape).
 
 ---
 
-## Limitations
+## Results
 
-- **Independence assumption** — sibling nodes are updated independently. Encode known interactions via `next_level`.
-- **Sequential only** — no native parallel evaluation.
-- **Maximization only** — negate the objective to minimize.
-- **No formal uncertainty bounds** — use rolling loss as a convergence heuristic.
+Median best objective over 30 paired seeds — same budget, same seeds, every
+method. Every problem is a maximization with optimum 0, so nearer zero is
+better. Re-running the commands below reproduces every table in this section.
+
+```bash
+python benchmarks/evaluate.py 30
+python benchmarks/evaluate.py 10 --suite heldout --methods tpe,butchc
+```
+
+Random search is a low bar, so the comparator carried throughout is TPE — same
+niche, and what a user choosing against BUTChC would actually reach for.
+`benchmarks/baselines.py` carries a dependency-free TPE and an Optuna
+`TPESampler` wrapper. `evaluate.py` also reports paired win-loss records and
+two-sided exact sign-test p-values; those records, not the medians, are what
+the claims here rest on.
+
+The suite is split in half. Defaults were selected by coordinate descent
+against the **tuned-on** problems only; the **held-out** problems were never
+consulted during that sweep, so they are the honest read on whether the
+defaults generalise.
+
+### Tuned on
+
+| Problem | Budget | Random | TPE | BUTChC | vs TPE |
+|---|---|---|---|---|---|
+| 2D quadratic | 200 | -0.0425 | -0.0004 | **-0.0000** | 30-0, p=0.000 |
+| 5D sphere | 500 | -3.7393 | -0.1312 | **-0.0000** | 29-1, p=0.000 |
+| Rosenbrock | 500 | -0.1036 | **-0.0202** | -0.0368 | 13-17, p=0.585 |
+| Rastrigin 4D | 600 | -17.5005 | -8.6510 | **-5.1169** | 26-4, p=0.000 |
+| 10D sphere | 1000 | -19.0750 | -2.2176 | **-0.0036** | 30-0, p=0.000 |
+| Ackley 5D | 600 | -14.1027 | -4.3008 | **-0.0323** | 30-0, p=0.000 |
+| Log-scale target | 200 | -0.0085 | -0.0006 | **-0.0000** | 29-1, p=0.000 |
+| Branch trap | 300 | -0.6219 | -1.0004 | **-0.0189** | 25-5, p=0.000 |
+| Categorical mix | 300 | -0.3226 | -0.0680 | **-0.0004** | 28-2, p=0.000 |
+| Integer mix | 300 | -0.2727 | -0.0016 | **-0.0000** | 26-4, p=0.000 |
+| Plateau (ties) | 300 | -0.5000 | -0.5000 | -0.5000 | 0-0, p=1.000 |
+
+### Held out
+
+| Problem | Budget | Random | TPE | BUTChC | vs TPE |
+|---|---|---|---|---|---|
+| Griewank 6D | 800 | -1.0183 | -0.4915 | **-0.4383** | 18-12, p=0.362 |
+| Styblinski 4D | 600 | -20.0007 | -4.0751 | **+0.0007** | 30-0, p=0.000 |
+| Nested pipeline | 400 | -0.2970 | -0.0096 | **-0.0089** | 15-15, p=1.000 |
+| Optimiser choice | 300 | -0.0277 | -0.0007 | **-0.0001** | 25-5, p=0.000 |
+| Rastrigin 8D | 1000 | -62.4076 | -39.0921 | **-21.5439** | 28-2, p=0.000 |
+| 20D sphere | 1500 | -69.0434 | -18.8961 | **-0.1255** | 30-0, p=0.000 |
+
+Four of the six held-out problems are significant wins on defaults that never
+saw them.
+
+### Under observation noise
+
+Scoring the *reported* best on the noise-free function (5D sphere, N(0,1)
+noise, budget 400): random -4.8604, TPE -0.8099, BUTChC **-0.4490** — 19-11
+against TPE at p=0.200, better on the median but not separable at 30 seeds.
+
+### What the records show
+
+**13 significant wins, zero significant losses, 5 ties**, across all 18
+problems. The margins are large where they are large: `Styblinski 4D` reaches
+the optimum outright (+0.0007 against -4.0751, 30-0), `20D sphere` lands 150×
+nearer it, `Ackley 5D` 133× nearer. `Branch trap` is 25-5 on a problem where
+TPE does *worse than random*, because the trap is precisely the conditional
+structure a flat model cannot see.
+
+The five ties are genuine non-results rather than hidden losses, and each has a
+reason; they are set out in full in
+[limitations](docs/limitations.md#the-non-results-in-full).
+
+### How long a result takes to arrive
+
+Final quality says where a method ends up, not when. `evaluate.py --anytime`
+reports the other axis. The clearest framing is **how much budget BUTChC needs
+to match TPE's final answer**:
+
+| Problem | Budget | Trials BUTChC needed | Fraction of budget |
+|---|---|---|---|
+| 20D sphere | 1500 | 148 | **1/10.1** |
+| 10D sphere | 1000 | 138 | **1/7.3** |
+| Styblinski 4D | 600 | 146 | 1/4.1 |
+| Ackley 5D | 600 | 155 | 1/3.9 |
+| 5D sphere | 500 | 128 | 1/3.9 |
+| Rastrigin 8D | 1000 | 325 | 1/3.1 |
+| Integer mix | 300 | 100 | 1/3.0 |
+| Categorical mix | 300 | 107 | 1/2.8 |
+| Branch trap | 300 | 111 | 1/2.7 |
+| Nested pipeline | 400 | 324 | 1/1.2 |
+
+On every problem it reaches, BUTChC matches TPE's *final* result partway
+through its own budget — median around a third of it.
+
+Against TPE's own arrival time the picture is split. On high-dimensional
+problems BUTChC is far quicker: `20D sphere` in 148 trials against TPE's 1133,
+on 30 of 30 seeds against TPE's 15. On conditional problems it arrives later
+even while matching or beating TPE's final quality — `Nested pipeline` 324
+against 188, `Optimiser choice` 206 against 115.
+
+Reliability is consistently BUTChC's. At 50% of the achievable range it reaches
+the target on 27–30 of 30 seeds where TPE manages 10–29; at 99% on `20D sphere`
+it arrives on 29 of 30 seeds while TPE never arrives at all. Full tables in
+[`dev/tools/results/`](dev/tools/results/).
+
+### What the optimiser itself costs
+
+Sample efficiency is one axis; the wall clock the optimiser spends choosing is
+another. With the objective stubbed to a constant, so the number is all
+optimiser:
+
+| Optimiser | 1D | 5D | 20D |
+|---|---|---|---|
+| **BUTChC** (pure Python, 0 deps) | **14 µs** | **52 µs** | **193 µs** |
+| TPE (this repo, pure Python) | 1037 µs | 5219 µs | 21270 µs |
+| Optuna `TPESampler` (numpy-backed) | 1433 µs | 6789 µs | 27864 µs |
+
+BUTChC is **73–145× cheaper per trial** than either TPE. Zero dependencies is
+not costing speed here: the numpy-backed implementation pays ~145× more per
+suggestion, because TPE refits Parzen estimators over the whole history and
+scores candidates, while BUTChC draws a reservoir point and jitters it —
+`O(d·K)` with `K = 25`. The gap widens with width, since BUTChC only touches
+the parameters on the sampled path while a flat model touches all of them.
+
+Reproduce with `python benchmarks/overhead.py`.
+
+### What batching costs
+
+A batch of `k` leaves the model stale for `k-1` evaluations. Median extra regret against sequential, 18 problems × 20 seeds at matched budgets:
+
+| `batch` | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|
+| Extra regret | −3.3% | −0.1% | +2.6% | +21.3% | +43.1% |
+
+```bash
+python benchmarks/batch_cost.py 20 --sizes 1,2,4,8,16,32
+```
+
+Up to `k=8` the cost sits inside seed noise, which makes an 8× wall-clock speedup close to free. Past `k=16` it is real. Batch sizes above your worker count pay the cost for nothing.
+
+### The spaces this is built for
+
+The 18 problems above are synthetic and were written in this repository. To
+measure the *shape* of real conditional spaces independently,
+[`dev/eval/pcs_stats.py`](dev/eval/pcs_stats.py) parses configuration spaces
+published by other people, for other purposes, years before this library
+existed, and reports how much of each is inactive in a typical configuration:
+
+| Space | Params | Median active | Inactive | Depth |
+|---|---|---|---|---|
+| AutoWEKA | 786 | 14 | **98.2%** | 4 |
+| auto-sklearn (2017) | 138 | 16 | **88.4%** | 2 |
+| SparrowToRiss | 222 | 67 | 69.8% | 4 |
+| SATenstein | 54 | 26 | 51.9% | 4 |
+| clasp 3.1.4 | 98 | 59 | 39.8% | 3 |
+
+```bash
+python dev/eval/pcs_stats.py --download
+```
+
+In AutoWEKA, 98.2% of the declared parameters are inactive in any given
+configuration — the share a flat optimiser searches and a conditional one
+skips. All 174 of its multi-parent conditions are chain-shaped, so the space is
+representable as a tree exactly rather than approximately.
+
+This measures the premise the library is built on, in spaces nobody here
+designed. It is not a head-to-head: no BUTChC-versus-TPE run has been executed
+on these spaces yet. Both halves of that are set out in
+[limitations](docs/limitations.md#what-the-benchmarks-establish-and-what-they-do-not).
 
 ---
+
+## Where it fits
+
+Reach for BUTChC when the search space is conditional, when it is wide, when
+the objective is noisy or on an awkward scale, or when adding a dependency is
+not an option. Those are the axes it is measured strongest on.
+
+Reach for something else when the budget is under ~50 trials on a smooth
+low-dimensional objective, where a Gaussian process will do better, or when
+your parameters interact strongly *within* a branch — sibling nodes are
+modelled independently, and `Rosenbrock` measures what that costs.
+
+The complete list of what the library does not model, does not express, and has
+not yet measured is in **[docs/limitations.md](docs/limitations.md)**. The one
+line worth carrying from it: the 18 benchmark problems are synthetic and were
+written alongside the optimiser, so benchmark your own space before committing
+to it.
+
+---
+
+## Versioning
+
+Defaults and internals change between minor versions, so **seeded runs do not reproduce across them**. See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

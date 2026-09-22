@@ -1,0 +1,25 @@
+inactive share of published configuration spaces
+(20000 configurations sampled uniformly per space)
+
+space                         params   cond   active   inactive  depth  multi  indep  forbid
+--------------------------------------------------------------------------------------------
+autoweka_original                786    783       14      98.2%      4    174      0       0
+auto-sklearn_2017_11_17          138    132       16      88.4%      2      0      0      79
+SparrowToRiss-cssc14             222    177       67      69.8%      4     13     11      21
+satenstein                        54     49       26      51.9%      4     33     31       0
+clasp-3.1.4                       98     63       59      39.8%      3      5      2       2
+lpg                               67     22       51      23.9%      2      3      3      12
+probSAT                            9      4        7      22.2%      1      1      1       0
+spear-params                      26      9       24       7.7%      2      0      0       0
+cplex12.6                         74      4       71       4.1%      1      0      0       0
+cryptominisat-params              36      2       36       0.0%      1      0      0       0
+lingeling-params                 323      0      323       0.0%      0      0      0       0
+
+across 10 conditional spaces: median inactive share 31.8%
+4 of 10 are expressible as a tree with no approximation: autoweka_original, spear-params, cplex12.6, cryptominisat-params
+  auto-sklearn_2017_11_17    not expressible: 79 forbidden clauses
+  SparrowToRiss-cssc14       not expressible: 11 independent-parent children; 21 forbidden clauses
+  satenstein                 not expressible: 31 independent-parent children
+  clasp-3.1.4                not expressible: 2 independent-parent children; 2 forbidden clauses
+  lpg                        not expressible: 3 independent-parent children; 12 forbidden clauses
+  probSAT                    not expressible: 1 independent-parent children

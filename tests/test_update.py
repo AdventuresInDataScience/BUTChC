@@ -1,229 +1,241 @@
-"""Tests for butchc._update: _update_tree."""
+"""Unit tests for butchc._update.
+
+Several of these are direct regressions against defects in v0.1:
+the objective being ignored entirely, and the reservoir never accumulating.
+"""
+
+import math
+import random
+
 import pytest
 
-from butchc._tree import _initialize_prob_tree
-from butchc._update import _update_tree
-from butchc._utils import KDE_RESERVOIR_SIZE
+from butchc._sampling import traverse_sample
+from butchc._tree import initialize_prob_tree
+from butchc._update import quality_weight, update_tree
+from butchc._utils import KDE_RESERVOIR_SIZE, effective_sample_size, weighted_mean
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-SIMPLE_CAT  = {'optimizer': {'values': ['adam', 'sgd', 'rmsprop']}}
-SIMPLE_CONT = {'lr': {'min': 0.0, 'max': 1.0}}
-
-HIERARCHICAL = {
-    'optimizer': {
-        'values': ['adam', 'sgd'],
-        'next_level': {
-            'adam': {'lr': {'min': 1e-4, 'max': 1e-2}},
-            'sgd':  {
-                'lr':       {'min': 1e-3, 'max': 1e-1},
-                'momentum': {'min': 0.0, 'max': 0.99},
-            },
-        },
-    },
-    'batch_size': {'values': [16, 32, 64]},
-}
+@pytest.fixture
+def rng():
+    return random.Random(0)
 
 
-# ---------------------------------------------------------------------------
-# Categorical updates
-# ---------------------------------------------------------------------------
+def trace_for(tree, values):
+    """Build a trace by hand for deterministic update tests."""
+    return {k: {"internal": v, "sub": None} for k, v in values.items()}
 
-class TestUpdateCategorical:
-    def test_chosen_count_increases(self):
-        tree   = _initialize_prob_tree(SIMPLE_CAT)
-        before = tree['optimizer']['counts']['adam']
-        _update_tree(tree, {'optimizer': 'adam'}, lambda_=1.0, alpha=1.0)
-        assert tree['optimizer']['counts']['adam'] > before
 
-    def test_unchosen_counts_unchanged(self):
-        tree        = _initialize_prob_tree(SIMPLE_CAT)
-        sgd_before  = tree['optimizer']['counts']['sgd']
-        rmsp_before = tree['optimizer']['counts']['rmsprop']
-        _update_tree(tree, {'optimizer': 'adam'}, lambda_=1.0, alpha=1.0)
-        assert tree['optimizer']['counts']['sgd']     == sgd_before
-        assert tree['optimizer']['counts']['rmsprop'] == rmsp_before
+class TestQualityWeight:
+    def test_below_gate_is_zero(self):
+        assert quality_weight(0.3, gamma=0.5) == 0.0
 
-    def test_probs_sum_to_one_after_update(self):
-        tree = _initialize_prob_tree(SIMPLE_CAT)
-        _update_tree(tree, {'optimizer': 'adam'}, lambda_=1.0, alpha=1.0)
-        assert abs(sum(tree['optimizer']['prob'].values()) - 1.0) < 1e-9
+    def test_at_gate_is_zero(self):
+        assert quality_weight(0.5, gamma=0.5) == 0.0
 
-    def test_chosen_prob_increases(self):
-        tree   = _initialize_prob_tree(SIMPLE_CAT)
-        before = tree['optimizer']['prob']['adam']
-        _update_tree(tree, {'optimizer': 'adam'}, lambda_=1.0, alpha=1.0)
-        assert tree['optimizer']['prob']['adam'] > before
+    def test_best_rank_is_one(self):
+        assert quality_weight(1.0, gamma=0.5) == pytest.approx(1.0)
 
-    def test_unchosen_probs_decrease(self):
-        tree      = _initialize_prob_tree(SIMPLE_CAT)
-        sgd_bef   = tree['optimizer']['prob']['sgd']
-        rmsp_bef  = tree['optimizer']['prob']['rmsprop']
-        _update_tree(tree, {'optimizer': 'adam'}, lambda_=1.0, alpha=1.0)
-        assert tree['optimizer']['prob']['sgd']     < sgd_bef
-        assert tree['optimizer']['prob']['rmsprop'] < rmsp_bef
+    def test_monotonic_above_gate(self):
+        weights = [quality_weight(r / 10, 0.5) for r in range(6, 11)]
+        assert weights == sorted(weights)
 
-    def test_returns_list(self):
-        tree   = _initialize_prob_tree(SIMPLE_CAT)
-        deltas = _update_tree(tree, {'optimizer': 'adam'}, lambda_=1.0, alpha=1.0)
-        assert isinstance(deltas, list)
+    def test_gamma_zero_keeps_everything_above_worst(self):
+        assert quality_weight(0.1, gamma=0.0) == pytest.approx(0.1)
 
-    def test_returns_one_delta_for_flat_cat(self):
-        tree   = _initialize_prob_tree(SIMPLE_CAT)
-        deltas = _update_tree(tree, {'optimizer': 'adam'}, lambda_=1.0, alpha=1.0)
+    def test_bounded_in_unit_interval(self):
+        for r in (0.0, 0.25, 0.5, 0.75, 1.0):
+            assert 0.0 <= quality_weight(r, 0.4) <= 1.0
+
+
+class TestCategoricalUpdate:
+    def test_chosen_value_gains_probability(self, rng):
+        tree = initialize_prob_tree({"a": {"values": ["x", "y"]}})
+        before = tree["a"]["prob"]["x"]
+        update_tree(tree, trace_for(tree, {"a": "x"}), 1.0, 1.0, 1.0, 5.0, rng)
+        assert tree["a"]["prob"]["x"] > before
+
+    def test_unchosen_value_loses_probability(self, rng):
+        tree = initialize_prob_tree({"a": {"values": ["x", "y"]}})
+        before = tree["a"]["prob"]["y"]
+        update_tree(tree, trace_for(tree, {"a": "x"}), 1.0, 1.0, 1.0, 5.0, rng)
+        assert tree["a"]["prob"]["y"] < before
+
+    def test_probabilities_stay_normalised(self, rng):
+        tree = initialize_prob_tree({"a": {"values": ["x", "y", "z"]}})
+        for _ in range(50):
+            update_tree(tree, trace_for(tree, {"a": "z"}), 1.0, 1.0, 0.7, 1.0, rng)
+        assert sum(tree["a"]["prob"].values()) == pytest.approx(1.0)
+
+    def test_zero_quality_still_reports_categorical_movement(self, rng):
+        # The node updates whether or not the gate passed, so the delta has to
+        # be reported or the loss understates how far the tree moved.
+        tree = initialize_prob_tree({"a": {"values": ["x", "y"]}})
+        deltas = update_tree(tree, trace_for(tree, {"a": "x"}), 1.0, 1.0, 0.0, 5.0, rng)
         assert len(deltas) == 1
+        assert deltas[0] > 0.0
 
-    def test_delta_in_valid_range(self):
-        tree   = _initialize_prob_tree(SIMPLE_CAT)
-        deltas = _update_tree(tree, {'optimizer': 'adam'}, lambda_=1.0, alpha=1.0)
-        assert all(0.0 <= d <= 1.0 for d in deltas)
-
-    def test_many_updates_converge_to_chosen(self):
-        tree   = _initialize_prob_tree(SIMPLE_CAT)
-        config = {'optimizer': 'adam'}
-        for _ in range(100):
-            _update_tree(tree, config, lambda_=1.0, alpha=0.1)
-        assert tree['optimizer']['prob']['adam'] > 0.9
-
-    def test_missing_param_returns_empty_deltas(self):
-        tree   = _initialize_prob_tree(SIMPLE_CAT)
-        deltas = _update_tree(tree, {}, lambda_=1.0, alpha=1.0)
+    def test_zero_quality_reports_no_continuous_movement(self, rng):
+        tree = initialize_prob_tree({"x": {"min": 0.0, "max": 1.0}})
+        deltas = update_tree(tree, trace_for(tree, {"x": 0.42}), 1.0, 1.0, 0.0, 5.0, rng)
         assert deltas == []
 
-    def test_large_lambda_shifts_more(self):
-        # With larger lambda_ the probability shift after one update is larger
-        tree_small = _initialize_prob_tree(SIMPLE_CAT)
-        tree_large = _initialize_prob_tree(SIMPLE_CAT)
-        d_small = _update_tree(tree_small, {'optimizer': 'adam'}, lambda_=0.1, alpha=1.0)
-        d_large = _update_tree(tree_large, {'optimizer': 'adam'}, lambda_=10.0, alpha=1.0)
-        assert d_large[0] > d_small[0]
+    def test_zero_quality_still_counts_the_visit(self, rng):
+        # Choices are scored by mean quality, so a trial that failed the gate
+        # is evidence against its branch and has to be counted.
+        tree = initialize_prob_tree({"a": {"values": ["x", "y"]}})
+        before = tree["a"]["prob"]["x"]
+        update_tree(tree, trace_for(tree, {"a": "x"}), 1.0, 1.0, 0.0, 5.0, rng)
+        assert tree["a"]["visits"]["x"] == 1.0
+        assert tree["a"]["prob"]["x"] < before
 
-    def test_high_alpha_keeps_distribution_flatter(self):
-        tree_low_a  = _initialize_prob_tree(SIMPLE_CAT)
-        tree_high_a = _initialize_prob_tree(SIMPLE_CAT)
-        for _ in range(20):
-            _update_tree(tree_low_a,  {'optimizer': 'adam'}, lambda_=1.0, alpha=0.01)
-            _update_tree(tree_high_a, {'optimizer': 'adam'}, lambda_=1.0, alpha=10.0)
-        # High alpha keeps distribution flatter — adam prob should be lower
-        assert tree_high_a['optimizer']['prob']['adam'] < tree_low_a['optimizer']['prob']['adam']
+    def test_zero_quality_leaves_the_archive_untouched(self, rng):
+        tree = initialize_prob_tree({"x": {"min": 0.0, "max": 1.0}})
+        snapshot = list(tree["x"]["reservoir"])
+        update_tree(tree, trace_for(tree, {"x": 0.42}), 1.0, 1.0, 0.0, 5.0, rng)
+        assert tree["x"]["reservoir"] == snapshot
+
+    def test_higher_quality_moves_further(self, rng):
+        def move(quality):
+            tree = initialize_prob_tree({"a": {"values": ["x", "y"]}})
+            update_tree(tree, trace_for(tree, {"a": "x"}), 1.0, 1.0, quality, 1.0, rng)
+            return tree["a"]["prob"]["x"]
+
+        assert move(1.0) > move(0.2)
+
+    def test_larger_alpha_keeps_distribution_flatter(self, rng):
+        def prob_after(alpha):
+            tree = initialize_prob_tree({"a": {"values": ["x", "y"]}})
+            for _ in range(20):
+                update_tree(tree, trace_for(tree, {"a": "x"}), 1.0, alpha, 1.0, 1.0, rng)
+            return tree["a"]["prob"]["x"]
+
+        assert prob_after(20.0) < prob_after(0.1)
+
+    def test_recurses_into_chosen_branch_only(self, rng):
+        space = {
+            "opt": {
+                "values": ["a", "b"],
+                "next_level": {
+                    "a": {"p": {"min": 0.0, "max": 1.0}},
+                    "b": {"q": {"min": 0.0, "max": 1.0}},
+                },
+            }
+        }
+        tree = initialize_prob_tree(space)
+        untouched = list(tree["opt"]["next_level"]["b"]["q"]["reservoir"])
+        trace = {"opt": {"internal": "a", "sub": trace_for({}, {"p": 0.5})}}
+        update_tree(tree, trace, 1.0, 1.0, 1.0, 5.0, rng)
+        assert tree["opt"]["next_level"]["b"]["q"]["reservoir"] == untouched
+        assert len(tree["opt"]["next_level"]["a"]["p"]["reservoir"]) == KDE_RESERVOIR_SIZE
 
 
-# ---------------------------------------------------------------------------
-# Continuous updates
-# ---------------------------------------------------------------------------
+class TestContinuousUpdate:
+    def test_observation_is_retained_not_immediately_pruned(self, rng):
+        # v0.1 regression: a new point entered below the weight of every
+        # prior grid point, so it was evicted on the same call.
+        tree = initialize_prob_tree({"x": {"min": 0.0, "max": 1.0}})
+        update_tree(tree, trace_for(tree, {"x": 0.42}), 1.0, 1.0, 1.0, 9.0, rng)
+        assert 0.42 in tree["x"]["reservoir"]
 
-class TestUpdateContinuous:
-    def test_reservoir_does_not_exceed_max_size(self):
-        tree = _initialize_prob_tree(SIMPLE_CONT)
+    def test_reservoir_never_exceeds_capacity(self, rng):
+        tree = initialize_prob_tree({"x": {"min": 0.0, "max": 1.0}})
+        for i in range(300):
+            update_tree(tree, trace_for(tree, {"x": i / 300}), 1.0, 1.0, 1.0, float(i), rng)
+        assert len(tree["x"]["reservoir"]) == KDE_RESERVOIR_SIZE
+        assert len(tree["x"]["weights"]) == KDE_RESERVOIR_SIZE
+        assert len(tree["x"]["scores"]) == KDE_RESERVOIR_SIZE
+
+    def test_weights_stay_normalised(self, rng):
+        tree = initialize_prob_tree({"x": {"min": 0.0, "max": 1.0}})
+        for i in range(100):
+            update_tree(tree, trace_for(tree, {"x": 0.3}), 1.0, 1.0, 1.0, float(i), rng)
+        assert sum(tree["x"]["weights"]) == pytest.approx(1.0)
+
+    def test_archive_keeps_high_scorers_and_drops_low(self, rng):
+        tree = initialize_prob_tree({"x": {"min": 0.0, "max": 1.0}})
+        for _ in range(60):
+            update_tree(tree, trace_for(tree, {"x": 0.9}), 1.0, 1.0, 1.0, 100.0, rng)
+        for _ in range(60):
+            update_tree(tree, trace_for(tree, {"x": 0.1}), 1.0, 1.0, 1.0, -100.0, rng)
+        # The good region should still dominate despite the later flood.
+        assert weighted_mean(tree["x"]["reservoir"], tree["x"]["weights"]) > 0.7
+
+    def test_reservoir_mean_tracks_good_observations(self, rng):
+        tree = initialize_prob_tree({"x": {"min": -5.0, "max": 5.0}})
+        for i in range(120):
+            update_tree(tree, trace_for(tree, {"x": 3.0}), 1.0, 1.0, 1.0, float(i), rng)
+        assert weighted_mean(tree["x"]["reservoir"], tree["x"]["weights"]) == pytest.approx(
+            3.0, abs=0.3
+        )
+
+    def test_effective_sample_size_stays_healthy(self, rng):
+        # v0.1 regression: a single observation took ~50% of the weight,
+        # collapsing effective sample size to about an eighth of the archive.
+        # The bar is a fraction of the archive, not a count: the failure being
+        # guarded against is "the weights collapsed onto a handful of points",
+        # which is proportional, and a literal count silently becomes a
+        # different test whenever KDE_RESERVOIR_SIZE is retuned.
+        tree = initialize_prob_tree({"x": {"min": 0.0, "max": 1.0}})
         for i in range(200):
-            _update_tree(tree, {'lr': i / 200}, lambda_=1.0, alpha=1.0)
-        assert len(tree['lr']['reservoir']) <= KDE_RESERVOIR_SIZE
+            update_tree(
+                tree, trace_for(tree, {"x": rng.random()}), 1.0, 1.0, 1.0, rng.random(), rng
+            )
+        ess = effective_sample_size(tree["x"]["weights"])
+        assert ess > 0.4 * KDE_RESERVOIR_SIZE
 
-    def test_weights_sum_to_one_after_single_update(self):
-        tree = _initialize_prob_tree(SIMPLE_CONT)
-        _update_tree(tree, {'lr': 0.5}, lambda_=1.0, alpha=1.0)
-        assert abs(sum(tree['lr']['weights']) - 1.0) < 1e-9
+    def test_prior_grid_is_displaced_by_real_observations(self, rng):
+        tree = initialize_prob_tree({"x": {"min": 0.0, "max": 1.0}})
+        for _ in range(KDE_RESERVOIR_SIZE):
+            update_tree(tree, trace_for(tree, {"x": 0.5}), 1.0, 1.0, 1.0, 1.0, rng)
+        assert all(s > -math.inf for s in tree["x"]["scores"])
 
-    def test_weights_sum_to_one_after_many_updates(self):
-        tree = _initialize_prob_tree(SIMPLE_CONT)
-        for v in [0.1, 0.2, 0.3, 0.7, 0.9]:
-            _update_tree(tree, {'lr': v}, lambda_=1.0, alpha=1.0)
-        assert abs(sum(tree['lr']['weights']) - 1.0) < 1e-9
+    def test_larger_lambda_sharpens_weighting(self, rng):
+        def spread(lambda_):
+            tree = initialize_prob_tree({"x": {"min": 0.0, "max": 1.0}})
+            for i in range(80):
+                update_tree(
+                    tree, trace_for(tree, {"x": i / 80}), lambda_, 1.0, 1.0, float(i), rng
+                )
+            return effective_sample_size(tree["x"]["weights"])
 
-    def test_returns_one_delta_for_single_cont_param(self):
-        tree   = _initialize_prob_tree(SIMPLE_CONT)
-        deltas = _update_tree(tree, {'lr': 0.5}, lambda_=1.0, alpha=1.0)
-        assert len(deltas) == 1
-
-    def test_delta_in_valid_range(self):
-        tree   = _initialize_prob_tree(SIMPLE_CONT)
-        deltas = _update_tree(tree, {'lr': 0.5}, lambda_=1.0, alpha=1.0)
-        assert 0.0 <= deltas[0] <= 1.0
-
-    def test_high_weight_point_survives_pruning(self):
-        # A point inserted with a very high lambda_ should not be pruned
-        tree = _initialize_prob_tree(SIMPLE_CONT)
-        _update_tree(tree, {'lr': 0.99}, lambda_=1000.0, alpha=1.0)
-        assert 0.99 in tree['lr']['reservoir']
-
-    def test_weights_all_positive(self):
-        tree = _initialize_prob_tree(SIMPLE_CONT)
-        for v in [0.1, 0.5, 0.9]:
-            _update_tree(tree, {'lr': v}, lambda_=1.0, alpha=1.0)
-        assert all(w > 0 for w in tree['lr']['weights'])
-
-    def test_zero_range_node_delta_is_zero(self):
-        # A continuous node where min == max should produce delta = 0
-        tree = {'p': {'min': 0.5, 'max': 0.5, 'reservoir': [0.5], 'weights': [1.0], 'total_weight': 1.0}}
-        deltas = _update_tree(tree, {'p': 0.5}, lambda_=1.0, alpha=1.0)
-        assert deltas[0] == 0.0
+        assert spread(3.0) < spread(0.3)
 
 
-# ---------------------------------------------------------------------------
-# Hierarchical updates
-# ---------------------------------------------------------------------------
-
-class TestUpdateHierarchical:
-    def test_adam_updates_its_subtree(self):
-        tree = _initialize_prob_tree(HIERARCHICAL)
-        weights_before = list(tree['optimizer']['next_level']['adam']['lr']['weights'])
-        _update_tree(
-            tree,
-            {'optimizer': 'adam', 'lr': 0.005, 'batch_size': 32},
-            lambda_=1.0, alpha=1.0,
+class TestDeltas:
+    def test_deltas_are_bounded(self, rng):
+        tree = initialize_prob_tree({"a": {"values": ["x", "y"]}, "n": {"min": 0.0, "max": 1.0}})
+        deltas = update_tree(
+            tree, trace_for(tree, {"a": "x", "n": 0.5}), 1.0, 1.0, 1.0, 3.0, rng
         )
-        weights_after = tree['optimizer']['next_level']['adam']['lr']['weights']
-        assert weights_after != weights_before
+        assert all(0.0 <= d <= 1.0 for d in deltas)
 
-    def test_sgd_does_not_update_adam_subtree(self):
-        tree = _initialize_prob_tree(HIERARCHICAL)
-        weights_before = list(tree['optimizer']['next_level']['adam']['lr']['weights'])
-        _update_tree(
-            tree,
-            {'optimizer': 'sgd', 'lr': 0.05, 'momentum': 0.9, 'batch_size': 32},
-            lambda_=1.0, alpha=1.0,
+    def test_one_delta_per_updated_node(self, rng):
+        tree = initialize_prob_tree({"a": {"values": ["x"]}, "n": {"min": 0.0, "max": 1.0}})
+        deltas = update_tree(
+            tree, trace_for(tree, {"a": "x", "n": 0.5}), 1.0, 1.0, 1.0, 3.0, rng
         )
-        assert tree['optimizer']['next_level']['adam']['lr']['weights'] == weights_before
+        assert len(deltas) == 2
 
-    def test_adam_does_not_update_sgd_subtree(self):
-        tree = _initialize_prob_tree(HIERARCHICAL)
-        weights_before = list(tree['optimizer']['next_level']['sgd']['lr']['weights'])
-        _update_tree(
-            tree,
-            {'optimizer': 'adam', 'lr': 0.005, 'batch_size': 32},
-            lambda_=1.0, alpha=1.0,
-        )
-        assert tree['optimizer']['next_level']['sgd']['lr']['weights'] == weights_before
+    def test_deltas_shrink_as_the_tree_settles(self, rng):
+        tree = initialize_prob_tree({"a": {"values": ["x", "y"]}})
+        first = update_tree(tree, trace_for(tree, {"a": "x"}), 1.0, 1.0, 1.0, 1.0, rng)[0]
+        for _ in range(200):
+            update_tree(tree, trace_for(tree, {"a": "x"}), 1.0, 1.0, 1.0, 1.0, rng)
+        last = update_tree(tree, trace_for(tree, {"a": "x"}), 1.0, 1.0, 1.0, 1.0, rng)[0]
+        assert last < first
 
-    def test_returns_deltas_for_all_touched_nodes(self):
-        tree   = _initialize_prob_tree(HIERARCHICAL)
-        # Touching optimizer (cat) + lr (cont) + batch_size (cat) = 3 nodes
-        deltas = _update_tree(
-            tree,
-            {'optimizer': 'adam', 'lr': 0.005, 'batch_size': 32},
-            lambda_=1.0, alpha=1.0,
-        )
-        assert len(deltas) == 3
 
-    def test_sgd_update_touches_momentum_subtree(self):
-        tree   = _initialize_prob_tree(HIERARCHICAL)
-        # optimizer (cat) + lr (cont) + momentum (cont) + batch_size (cat) = 4
-        deltas = _update_tree(
-            tree,
-            {'optimizer': 'sgd', 'lr': 0.05, 'momentum': 0.9, 'batch_size': 32},
-            lambda_=1.0, alpha=1.0,
-        )
-        assert len(deltas) == 4
-
-    def test_all_hierarchical_deltas_in_valid_range(self):
-        tree   = _initialize_prob_tree(HIERARCHICAL)
-        deltas = _update_tree(
-            tree,
-            {'optimizer': 'adam', 'lr': 0.005, 'batch_size': 32},
-            lambda_=1.0, alpha=1.0,
-        )
-        for d in deltas:
-            assert 0.0 <= d <= 1.0
+class TestNameCollisionSafety:
+    def test_update_follows_the_trace_not_parameter_names(self, rng):
+        # Updates key off tree structure, so a repeated name in a nested
+        # branch cannot corrupt an unrelated node. (The search-space
+        # validator rejects such spaces outright; this guards the mechanism.)
+        space = {
+            "outer": {"values": ["p", "q"], "next_level": {"p": {"inner": {"values": ["p", "q"]}}}}
+        }
+        tree = initialize_prob_tree(space)
+        trace = {"outer": {"internal": "p", "sub": {"inner": {"internal": "q", "sub": None}}}}
+        update_tree(tree, trace, 1.0, 1.0, 1.0, 1.0, rng)
+        assert tree["outer"]["counts"]["p"] > 0
+        assert tree["outer"]["counts"]["q"] == 0
+        assert tree["outer"]["next_level"]["p"]["inner"]["counts"]["q"] > 0
