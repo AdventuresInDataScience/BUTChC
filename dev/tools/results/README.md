@@ -13,6 +13,7 @@ All of this was measured against the 0.6.0 defaults (`alpha` 3.0, `gamma` 0.85,
 | `quality_30seed.txt` | Final best after full budget. `TUNED ON` and `UNDER OBSERVATION NOISE` complete, with win-loss records and sign-test p-values. |
 | `speed_30seed.txt` | Trials-to-target at 50/80/95/99% of achievable range, plus trials to reach TPE's median final value. |
 | `overhead_600trials.txt` | Optimiser wall-clock per trial, free objective, 1D/5D/20D, against this repo's TPE and Optuna's `TPESampler`. |
+| `pcs_inactive_share.txt` | Inactive-parameter share of 11 published configuration spaces, from `dev/eval/pcs_stats.py`. Not a BUTChC measurement — it characterises the spaces, not the optimiser. |
 
 Every number quoted in `README.md` and `CHANGELOG.md` for 0.6.0 came from these
 runs. The `TUNED ON` win-loss records were independently reproduced by two

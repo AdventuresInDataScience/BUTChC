@@ -2,7 +2,7 @@
 
 **B**ayesian **U**pdate **T**ree **Ch**ained **C**onditionally — a dependency-free, probabilistic black-box hyperparameter optimizer.
 
-BUTChC maintains a probability distribution over a **hierarchical, conditional search space** and refines it from observed objective values. Parameters can depend on choices made higher up the tree: `momentum` exists only when `optimizer=sgd`, `kernel_size` only when `model=cnn`. No trial is spent on irrelevant combinations, and each branch learns its own parameters from only the trials that used it.
+BUTChC maintains a probability distribution over a **hierarchical, conditional search space** and refines it from observed objective values. Parameters can depend on choices made higher up the tree: `momentum` exists only when `optimizer=sgd`, `kernel_size` only when `model=cnn`. Invalid combinations are unreachable by construction rather than discovered by trial, and each branch learns its own parameters from only the trials that used it.
 
 No gradients, no differentiability, no assumptions about the objective's internals.
 
@@ -15,7 +15,9 @@ No gradients, no differentiability, no assumptions about the objective's interna
 - **Fails fast** — search spaces and hyperparameters are validated before the first objective call
 - **Prunable** — `prune` turns a finished run into a smaller space, to search again or hand to another optimiser
 
-📖 **[API reference](docs/api.md)** · **[Examples](docs/examples.md)** · **[Design notes](docs/design.md)** · **[Codemap](docs/codemap.md)** · **[Changelog](CHANGELOG.md)**
+Against TPE across 18 benchmark problems at 30 paired seeds: **13 significant wins, zero significant losses**, at **73–145× lower per-trial cost**.
+
+📖 **[API reference](docs/api.md)** · **[Examples](docs/examples.md)** · **[Design notes](docs/design.md)** · **[Limitations](docs/limitations.md)** · **[Codemap](docs/codemap.md)** · **[Changelog](CHANGELOG.md)**
 
 ---
 
@@ -131,7 +133,9 @@ A categorical node can map each of its choices to a sub-searchspace via `next_le
 }
 ```
 
-Each branch keeps its own model, so learning the best `lr` for adam does not interfere with learning the best `lr` for sgd. Nesting is arbitrarily deep.
+Each branch keeps its own model, so learning the best `lr` for adam does not interfere with learning the best `lr` for sgd. `next_level` is the only nesting mechanism and it composes, so nesting is arbitrarily deep — [a worked four-level space](docs/examples.md#nesting-more-than-one-level) shows how.
+
+This is also how you express an invalid combination. "`penalty=elasticnet` only works with `solver=saga`" becomes a `solver` node whose branches carry different `penalty` values — the invalid pairing is then unreachable, and no budget is spent finding that out. Constraints that cross the tree rather than nest are the exception; see [limitations](docs/limitations.md#search-spaces-butchc-cannot-express).
 
 Any node can carry a `prior` and a `prior_strength` measured in pseudo-trials. See the [API reference](docs/api.md#search-space-format) for the full format, priors, and the uniqueness rule for names.
 
@@ -171,16 +175,19 @@ Full reasoning in [design notes](docs/design.md).
 
 `lambda_` and `alpha` act on different node types and do not interact: `lambda_` controls how sharply continuous archives concentrate, `alpha` how slowly categorical nodes commit. Note `lambda_` saturates — it acts only through `min(RANK_SHARPNESS * lambda_, MAX_SHARPNESS)`, so any value at or above 3.33 is clipped and does nothing. See [api.md](docs/api.md#butchc_optimize).
 
-The two knobs most worth reaching for are not in this table. `KDE_RESERVOIR_SIZE` (default 25) and `MIN_BANDWIDTH_FRACTION` (default 0.0003) between them decide how hard the continuous model concentrates, and they carry more of the 0.6.0 gain than anything else. They interact, so retune them together: a **smooth, high-dimensional** space wants the gentler pair (`50` and `0.001`), while conditional and multimodal spaces want the sharp defaults.
+The two knobs most worth reaching for are not in this table. `KDE_RESERVOIR_SIZE` (default 25) and `MIN_BANDWIDTH_FRACTION` (default 0.0003) between them decide how hard the continuous model concentrates, and they carry more of the measured gain than anything else. They interact, so retune them together: a **smooth, high-dimensional** space wants the gentler pair (`50` and `0.001`), while conditional and multimodal spaces want the sharp defaults.
+
+### Tuning for your problem's shape
+
+The defaults are an average over problem shapes. `benchmarks/tune.py --regime` sweeps against problems sharing one property and prints what that shape wants: `branched` spaces want faster commitment, `noisy` ones want `explore 0.1`, `multimodal` ones want a smaller reservoir. The table is in [docs/api.md](docs/api.md#tuning-by-problem-shape).
 
 ---
 
-## Benchmarks
+## Results
 
 Median best objective over 30 paired seeds — same budget, same seeds, every
 method. Every problem is a maximization with optimum 0, so nearer zero is
-better. Measured against the shipped 0.6.0 defaults; re-running the command
-below reproduces the tables.
+better. Re-running the commands below reproduces every table in this section.
 
 ```bash
 python benchmarks/evaluate.py 30
@@ -192,10 +199,14 @@ niche, and what a user choosing against BUTChC would actually reach for.
 `benchmarks/baselines.py` carries a dependency-free TPE and an Optuna
 `TPESampler` wrapper. `evaluate.py` also reports paired win-loss records and
 two-sided exact sign-test p-values; those records, not the medians, are what
-the claims below rest on.
+the claims here rest on.
 
-**Tuned on** — the defaults were selected against these, so read them as
-optimistic. Win-loss is BUTChC against TPE.
+The suite is split in half. Defaults were selected by coordinate descent
+against the **tuned-on** problems only; the **held-out** problems were never
+consulted during that sweep, so they are the honest read on whether the
+defaults generalise.
+
+### Tuned on
 
 | Problem | Budget | Random | TPE | BUTChC | vs TPE |
 |---|---|---|---|---|---|
@@ -211,8 +222,7 @@ optimistic. Win-loss is BUTChC against TPE.
 | Integer mix | 300 | -0.2727 | -0.0016 | **-0.0000** | 26-4, p=0.000 |
 | Plateau (ties) | 300 | -0.5000 | -0.5000 | -0.5000 | 0-0, p=1.000 |
 
-**Held out** — never consulted while tuning, so this is the honest read on
-whether the defaults generalise.
+### Held out
 
 | Problem | Budget | Random | TPE | BUTChC | vs TPE |
 |---|---|---|---|---|---|
@@ -223,73 +233,33 @@ whether the defaults generalise.
 | Rastrigin 8D | 1000 | -62.4076 | -39.0921 | **-21.5439** | 28-2, p=0.000 |
 | 20D sphere | 1500 | -69.0434 | -18.8961 | **-0.1255** | 30-0, p=0.000 |
 
-Under observation noise, scoring the *reported* best on the noise-free function
-(5D sphere, N(0,1) noise, budget 400): random -4.8604, TPE -0.8099, BUTChC
-**-0.4490**, 19-11 against TPE at p=0.200 — better on the median, not
-separable at 30 seeds.
+Four of the six held-out problems are significant wins on defaults that never
+saw them.
 
-### What the records say
+### Under observation noise
 
-Against TPE across all 18 problems: **13 statistically significant wins, zero
-significant losses, 5 ties.** The margins are large where they are large —
-`Styblinski 4D` reaches the optimum outright (+0.0007 against -4.0751, 30-0),
-`20D sphere` lands 150× nearer it, `Ackley 5D` 133× nearer, and `Branch trap`
-25-5 on a problem where TPE does *worse than random*, because the trap is
-precisely the conditional structure a flat model cannot see.
+Scoring the *reported* best on the noise-free function (5D sphere, N(0,1)
+noise, budget 400): random -4.8604, TPE -0.8099, BUTChC **-0.4490** — 19-11
+against TPE at p=0.200, better on the median but not separable at 30 seeds.
 
-The 0.6.0 retune closed both results the previous release conceded. `Optimiser
-choice` went from a 12-18 loss to a **25-5 win**, and `Nested pipeline` from
-10-20 to a **15-15 tie** with the medians now effectively equal (-0.0089
-against -0.0096). Both are held out, so neither was available to fit against.
+### What the records show
 
-Three things still worth weighing, none of them a loss:
+**13 significant wins, zero significant losses, 5 ties**, across all 18
+problems. The margins are large where they are large: `Styblinski 4D` reaches
+the optimum outright (+0.0007 against -4.0751, 30-0), `20D sphere` lands 150×
+nearer it, `Ackley 5D` 133× nearer. `Branch trap` is 25-5 on a problem where
+TPE does *worse than random*, because the trap is precisely the conditional
+structure a flat model cannot see.
 
-- **`Rosenbrock` 13-17, p=0.585.** Expected and structural: a narrow curved
-  valley is parameter interaction, which the independence assumption cannot
-  model. Read it as "no advantage", not a loss — and as the honest cost of
-  modelling siblings independently.
-- **`Griewank 6D` 18-12, p=0.362 and `Noisy 5D sphere` 19-11, p=0.200.** Better
-  on the median, not separable at 30 seeds. More seeds would settle them.
-- **`Nested pipeline` is a tie, not a win.** Conditional structure is where
-  BUTChC is *designed* to win, and on this problem it now draws rather than
-  leads. It also still arrives later than TPE there (324 trials against 188)
-  even while matching the final answer.
-
-`Plateau` is saturated — all three methods reach the discretised optimum, so it
-is a regression guard for tie handling, not a discriminator.
-
-**What these benchmarks do not show.** Every problem here is synthetic and was
-written in this repository. The claim BUTChC is built on — that a pre-specified
-conditional space avoids the budget a flat optimiser wastes on inactive
-parameters — has no published-benchmark evidence behind it yet. The suite's own
-`flat_tpe_search` exists to isolate exactly that and finds almost nothing,
-because these spaces are too narrow for the waste to matter. The candidate that
-would settle it, YAHPO Gym's `rbv2_super` (41 parameters, 75.6% inactive per
-configuration, 103 real datasets), is currently unusable for a reason recorded
-in [dev/eval/README.md](dev/eval/README.md).
-
-### Tuning for your problem's shape
-
-The defaults are an average over problem shapes. `benchmarks/tune.py --regime`
-sweeps against problems sharing one property and prints what that shape wants:
-`branched` spaces want faster commitment, `noisy` ones want `explore 0.1`,
-`multimodal` ones want a smaller reservoir. The table is in
-[docs/api.md](docs/api.md#tuning-by-problem-shape).
-
-That mechanism is what produced 0.6.0's defaults. Every regime sweep preferred
-a smaller `min_bandwidth` than the then-shipped `0.01`; measured directly,
-`0.001` wins **200-34** across all 18 problems at 20 paired seeds. Because every
-other default had been selected with the old floor, fixing it required a full
-re-sweep, which moved five defaults in total — `alpha`, `gamma`, `explore`,
-`KDE_RESERVOIR_SIZE` and `min_bandwidth` itself. The tables above are measured
-against the result.
+The five ties are genuine non-results rather than hidden losses, and each has a
+reason; they are set out in full in
+[limitations](docs/limitations.md#the-non-results-in-full).
 
 ### How long a result takes to arrive
 
 Final quality says where a method ends up, not when. `evaluate.py --anytime`
-reports the other axis. Measured on the 0.6.0 defaults, 30 paired seeds, the
-clearest framing is **how much budget BUTChC needs to match TPE's final
-answer**:
+reports the other axis. The clearest framing is **how much budget BUTChC needs
+to match TPE's final answer**:
 
 | Problem | Budget | Trials BUTChC needed | Fraction of budget |
 |---|---|---|---|
@@ -307,19 +277,15 @@ answer**:
 On every problem it reaches, BUTChC matches TPE's *final* result partway
 through its own budget — median around a third of it.
 
-Against TPE's own arrival time the picture is split, and the split is
-informative. On high-dimensional problems BUTChC is far quicker: `20D sphere`
-in 148 trials against TPE's 1133, on 30 of 30 seeds against TPE's 15. On the
-conditional problems it is still slower to arrive even though it now matches or
-beats TPE's final quality — `Nested pipeline` 324 against 188, `Optimiser
-choice` 206 against 115, `Griewank 6D` 364 against 193.
+Against TPE's own arrival time the picture is split. On high-dimensional
+problems BUTChC is far quicker: `20D sphere` in 148 trials against TPE's 1133,
+on 30 of 30 seeds against TPE's 15. On conditional problems it arrives later
+even while matching or beating TPE's final quality — `Nested pipeline` 324
+against 188, `Optimiser choice` 206 against 115.
 
 Reliability is consistently BUTChC's. At 50% of the achievable range it reaches
 the target on 27–30 of 30 seeds where TPE manages 10–29; at 99% on `20D sphere`
-it arrives on 29 of 30 seeds while TPE never arrives at all.
-
-So: quicker and more reliable on dimension, more reliable but later on
-conditional structure. Full tables in
+it arrives on 29 of 30 seeds while TPE never arrives at all. Full tables in
 [`dev/tools/results/`](dev/tools/results/).
 
 ### What the optimiser itself costs
@@ -338,11 +304,10 @@ BUTChC is **73–145× cheaper per trial** than either TPE. Zero dependencies is
 not costing speed here: the numpy-backed implementation pays ~145× more per
 suggestion, because TPE refits Parzen estimators over the whole history and
 scores candidates, while BUTChC draws a reservoir point and jitters it —
-`O(d·K)` with `K = 25`.
+`O(d·K)` with `K = 25`. The gap widens with width, since BUTChC only touches
+the parameters on the sampled path while a flat model touches all of them.
 
-Read it alongside sample efficiency rather than instead of it, and note it is
-close to irrelevant when a trial costs a model fit: against a 100 ms objective,
-193 µs is 0.2%. Reproduce with `python benchmarks/overhead.py`.
+Reproduce with `python benchmarks/overhead.py`.
 
 ### What batching costs
 
@@ -358,25 +323,54 @@ python benchmarks/batch_cost.py 20 --sizes 1,2,4,8,16,32
 
 Up to `k=8` the cost sits inside seed noise, which makes an 8× wall-clock speedup close to free. Past `k=16` it is real. Batch sizes above your worker count pay the cost for nothing.
 
-### Reading the tables
+### The spaces this is built for
 
-- **Ratios flatter.** Most of these are squared errors, where an 800× ratio is about 28× in distance. The raw columns are the honest ones.
-- **Medians hide the spread.** A median gap of 2× on one problem and a 30-0 record on another are different kinds of evidence. Prefer the win-loss column.
-- **Rastrigin is the hard case.** Dense local optima limit how much any method modelling parameters independently can gain.
-- **These are synthetic.** Every problem here was written alongside the optimiser, held-out or not. `dev/eval/` runs the same harness against YAHPO surrogates for a landscape nobody involved designed.
+The 18 problems above are synthetic and were written in this repository. To
+measure the *shape* of real conditional spaces independently,
+[`dev/eval/pcs_stats.py`](dev/eval/pcs_stats.py) parses configuration spaces
+published by other people, for other purposes, years before this library
+existed, and reports how much of each is inactive in a typical configuration:
+
+| Space | Params | Median active | Inactive | Depth |
+|---|---|---|---|---|
+| AutoWEKA | 786 | 14 | **98.2%** | 4 |
+| auto-sklearn (2017) | 138 | 16 | **88.4%** | 2 |
+| SparrowToRiss | 222 | 67 | 69.8% | 4 |
+| SATenstein | 54 | 26 | 51.9% | 4 |
+| clasp 3.1.4 | 98 | 59 | 39.8% | 3 |
+
+```bash
+python dev/eval/pcs_stats.py --download
+```
+
+In AutoWEKA, 98.2% of the declared parameters are inactive in any given
+configuration — the share a flat optimiser searches and a conditional one
+skips. All 174 of its multi-parent conditions are chain-shaped, so the space is
+representable as a tree exactly rather than approximately.
+
+This measures the premise the library is built on, in spaces nobody here
+designed. It is not a head-to-head: no BUTChC-versus-TPE run has been executed
+on these spaces yet. Both halves of that are set out in
+[limitations](docs/limitations.md#what-the-benchmarks-establish-and-what-they-do-not).
 
 ---
 
-## Limitations
+## Where it fits
 
-- **Independence assumption** — sibling nodes are modelled independently. Interactions between parameters in the same branch are not captured; encode known ones via `next_level`.
-- **Maximization only** — negate to minimize.
-- **No formal uncertainty bounds** — `rolling_loss` is a heuristic, not a posterior. It says the model stopped moving, not that the optimum was found.
-- **Categorical ties commit arbitrarily** — when two branches reach the same optimum, budget concentrates on whichever wins first. Raise `alpha` or `temp` if you need both explored.
-- **`best_params` and `prob_tree` can disagree** — the best configuration found may sit in a branch the tree assigns low probability. They answer different questions: one is the best single point seen, the other is where the model would spend the next trial. A large disagreement means the budget was too small for the tree to settle.
-- **Branches are judged on average** — a branch whose best configuration is excellent but whose typical configuration is poor is at a disadvantage while its sub-parameters are untuned. Three mechanisms push back: a node commits more slowly the more sub-space its choices open, its statistics are recency-weighted so an early verdict decays, and the commitment exponent ramps from zero rather than from one. This is mitigation, not a guarantee — raise `alpha` or lower `COMMITMENT` if a branch you believe in is being abandoned. The `Branch trap` benchmark isolates this case.
-- **No ordinal node type** — ordered discrete parameters are modelled as unordered choices, losing neighbourhood structure.
-- **Not a Gaussian-process method** — on very small budgets (under ~50 trials) with cheap-to-model smooth objectives, a GP-based optimizer will typically do better. BUTChC's measured strengths are dimension, categorical mixtures, noise and objective scale, plus zero dependencies. Conditional structure is what it is *designed* for, and the benchmarks are mixed there: a decisive win on `Branch trap`, losses to TPE on `Nested pipeline` and `Optimiser choice`. Benchmark your own space before assuming the structure alone is a reason to choose it.
+Reach for BUTChC when the search space is conditional, when it is wide, when
+the objective is noisy or on an awkward scale, or when adding a dependency is
+not an option. Those are the axes it is measured strongest on.
+
+Reach for something else when the budget is under ~50 trials on a smooth
+low-dimensional objective, where a Gaussian process will do better, or when
+your parameters interact strongly *within* a branch — sibling nodes are
+modelled independently, and `Rosenbrock` measures what that costs.
+
+The complete list of what the library does not model, does not express, and has
+not yet measured is in **[docs/limitations.md](docs/limitations.md)**. The one
+line worth carrying from it: the 18 benchmark problems are synthetic and were
+written alongside the optimiser, so benchmark your own space before committing
+to it.
 
 ---
 

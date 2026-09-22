@@ -38,12 +38,50 @@ below.
 
 ## Tools that need nothing
 
-Two scripts here run on a bare Python, no install and no dependencies:
+Three scripts here run on a bare Python, no install and no dependencies:
 
 ```bash
 python dev/eval/fingerprint.py       # hash seeded runs; prove a refactor is behaviour-neutral
 python dev/eval/check_parallel.py    # real thread/process pools; speedup + reproducibility
+python dev/eval/pcs_stats.py --download   # inactive share of published config spaces
 ```
+
+## How hierarchical are real spaces? (`pcs_stats.py`)
+
+The founding claim needs two things: that real spaces waste a large share of a
+flat optimiser's budget on inactive parameters, and that BUTChC exploits it.
+The second needs a surrogate and a run. The first is a property of published
+space definitions, and `pcs_stats.py` measures it against the `.pcs` files
+vendored in ConfigSpace's test suite, which come from AClib and the
+Configurable SAT Solver Competition. No solver, no surrogate, no dependency.
+
+| Space | Params | Median active | Inactive | Depth | Multi-parent | Independent | Forbidden |
+|---|---|---|---|---|---|---|---|
+| autoweka_original | 786 | 14 | **98.2%** | 4 | 174 | **0** | **0** |
+| auto-sklearn_2017_11_17 | 138 | 16 | 88.4% | 2 | 0 | 0 | 79 |
+| SparrowToRiss-cssc14 | 222 | 67 | 69.8% | 4 | 13 | 11 | 21 |
+| satenstein | 54 | 26 | 51.9% | 4 | 33 | 31 | 0 |
+| clasp-3.1.4 | 98 | 59 | 39.8% | 3 | 5 | 2 | 2 |
+| lpg | 67 | 51 | 23.9% | 2 | 3 | 3 | 12 |
+| probSAT | 9 | 7 | 22.2% | 1 | 1 | 1 | 0 |
+| spear-params | 26 | 24 | 7.7% | 2 | 0 | 0 | 0 |
+| cplex12.6 | 74 | 71 | 4.1% | 1 | 0 | 0 | 0 |
+| cryptominisat-params | 36 | 36 | 0.0% | 1 | 0 | 0 | 0 |
+| lingeling-params | 323 | 323 | 0.0% | 0 | 0 | 0 | 0 |
+
+Three findings, two of which were not what was expected:
+
+- **The AutoML pipeline spaces are the hierarchical ones, not the SAT solvers.**
+  `lingeling` is 323 parameters and completely flat; `cplex12.6` has four
+  conditions. The intuition that algorithm-configuration spaces are the most
+  conditional artefacts published is wrong — they are *wide*. AutoWEKA and
+  auto-sklearn are the deep ones.
+- **AutoWEKA beats `rbv2_super` on the metric that matters.** 98.2% inactive
+  against 75.6%, on 786 parameters against 41.
+- **AutoWEKA is exactly representable.** Zero forbidden clauses, and all 174 of
+  its multi-parent children are chain-shaped — no child has two independent
+  parents. The tree model can hold this space with no approximation; only the
+  converter refuses it.
 
 ## Run
 
@@ -109,17 +147,21 @@ letting tree position imply the shallower conditions, would represent
 `rbv2_super` exactly rather than approximately, while still refusing genuinely
 independent parents.
 
-**That change was considered and declined.** Extending the converter to fit the
+**That change was considered and declined, on grounds that have since
+weakened.** The original objection was that extending the converter to fit the
 one benchmark that would showcase the library invites the reading that the
-benchmark was chosen to fit the tool. The refusal is documented in three places
-as a principled limit, and relaxing it to unlock a favourable result is a worse
-trade than not having the result. Recorded here so the reasoning is not
-rediscovered: the limitation is in `butchc.interop`, not in the tree model, and
-`rbv2_super` is representable whenever that is revisited on its own merits.
+benchmark was chosen to fit the tool. `pcs_stats.py` changes the arithmetic:
+chain-shaped conjunctions are the common case across eleven published spaces,
+not a quirk of `rbv2_super`, so the extension is now a general converter
+improvement that happens to unlock a benchmark rather than the reverse. Worth
+revisiting — with the caveat that the credible order is to ship and test the
+converter change on its own merits *first*, and run the benchmark afterwards.
 
-Consequence: use fallback 1 below. The conditional-waste claim therefore has no
-published-benchmark evidence behind it yet, which is worth stating plainly
-wherever the claim is made.
+The limitation is in `butchc.interop`, not in the tree model.
+
+Consequence for now: the *premise* of the conditional-waste claim is evidenced
+by `pcs_stats.py`; the *head-to-head* is not, and that distinction is worth
+preserving wherever the claim is made.
 
 ## The bridge now ships
 
@@ -153,22 +195,28 @@ until either the converter is extended or a conjunction-free scenario is used.
 
 ## Fallbacks
 
-In rough order of effort. **Fallback 1 is the chosen path.**
+Reordered after `pcs_stats.py`. **Option 1 is the chosen path.**
 
-1. **A hand-built sklearn CASH space** on a few OpenML-CC18 datasets: scaler ×
-   model × model-specific hyperparameters, scored by cross-validation. Real,
-   genuinely hierarchical, credible to practitioners, and needs only
-   `scikit-learn` + `openml`. Slower per evaluation, so budgets shrink. The
-   conditional structure here is the *obvious* encoding of the problem — an
-   SVM has no `n_estimators` — so ex-ante knowledge of it is a practitioner's
-   normal starting point rather than an advantage handed to the optimiser.
-   Its weakness against `rbv2_super` is that we author it, so the space is
-   ours; mitigate by taking the model list and ranges from a published AutoML
-   default (auto-sklearn's or mlr3's) rather than inventing them, and by
-   citing which.
-2. **Other YAHPO scenarios.** `lcbench` and `nb301` are in the same 20 MB-per
-   -scenario data repo and may avoid conjunctions — worth probing with the
-   recipe above before writing anything. Both are flatter than `rbv2_super`,
-   so they demonstrate less of the conditional-waste effect.
+1. **AutoWEKA's published space, evaluated through scikit-learn equivalents.**
+   The `pcs_stats.py` table above makes this the best candidate available:
+   786 parameters, 98.2% inactive, depth 4, zero forbidden clauses, zero
+   independent-parent children. It is published (Thornton et al., 2013),
+   predates this library by a decade, and answers the authorship objection
+   that sinks a hand-built space. Two pieces of work: teach the converter
+   chain-shaped conjunctions (see the blocker above — note that argument now
+   cuts differently, since the extension is justified by eleven spaces rather
+   than by the one it would unlock), and map WEKA learners onto sklearn
+   equivalents, or drive WEKA directly.
+2. **A hand-built sklearn CASH space** on a few OpenML-CC18 datasets: scaler ×
+   model × model-specific hyperparameters, scored by cross-validation. Needs
+   only `scikit-learn` + `openml` and no converter work, which is why it stays
+   on the list. Its weakness is that we author it; mitigate by taking the model
+   list and ranges from a published AutoML default and citing which.
 3. **HPOBench**, which wraps YAHPO among others behind a container interface —
    more setup, but avoids managing surrogate data yourself.
+
+**Ruled out.** `lcbench` is 7 flat parameters and `nb301` is a DARTS cell space
+of per-edge operation choices; neither has the conditional structure this tier
+exists to test. Live AClib runs are also out: the objective is mean PAR10 over
+an instance set at a 300 s cutoff, which puts a single trial in the tens of
+minutes and 30 paired seeds beyond any sane budget.

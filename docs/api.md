@@ -61,7 +61,7 @@ Arguments after `*` are keyword-only. `**kwargs` is forwarded verbatim to every
 | `alpha` | `float > 0` | `3.0` | Smoothing for categorical nodes, in pseudo-visits. Higher keeps probabilities nearer uniform for longer. |
 | `temp` | `float > 0` | `1.0` | Softmax temperature for categorical sampling. `>1` explores, `<1` exploits. |
 | `gamma` | `float` in `[0, 1)` | `0.85` | Quantile gate on the *continuous* archive. Only trials ranking above this quantile are archived. Categorical nodes score every trial by rank and ignore it. |
-| `explore` | `float` in `[0, 1]` | `0.05` | Per-node probability of a uniform draw instead of a modelled one. Non-zero since 0.6.0: the sharper archive it now ships with needs a floor under it. |
+| `explore` | `float` in `[0, 1]` | `0.05` | Per-node probability of a uniform draw instead of a modelled one. Non-zero by default, because the archive concentrates sharply enough to need a floor under it. |
 | `n_warmup` | `int >= 0` \| `None` | `None` → `0` | Trials drawn uniformly from every node before modelling begins. They reach no continuous archive, but categorical nodes still record their visit and rank — see below. |
 
 `explore` is a floor **per node**, not per configuration: a config in which all
@@ -86,7 +86,8 @@ Two consequences. Raising `lambda_` past 3.33 to "exploit harder" does nothing;
 lower `RANK_SHARPNESS` first if you want room above. And `lambda_` and
 `RANK_SHARPNESS` are one degree of freedom, not two, so sweeping both is
 sweeping the same axis twice. This is the continuous-side twin of the
-`temp`/`COMMITMENT` collapse in [design.md](design.md#open-questions).
+`temp`/`COMMITMENT` collapse in
+[limitations.md](limitations.md#open-design-questions).
 
 The ceiling itself is not the limitation — it is close to optimal. Raising
 `MAX_SHARPNESS` above 10 degrades monotonically across all 18 problems at 20
@@ -201,7 +202,70 @@ sampled and updated only when their parent value is chosen.
 ```
 
 Each branch keeps its own model, so learning the best `lr` for adam does not
-interfere with learning it for sgd. Nesting is arbitrarily deep.
+interfere with learning it for sgd.
+
+#### Nesting deeper
+
+`next_level` is the only nesting mechanism, and it composes: a sub-searchspace
+is an ordinary searchspace, so any categorical inside one can carry its own
+`next_level`, to any depth.
+
+```python
+searchspace = {
+    'task': {
+        'values': ['vision', 'text'],
+        'next_level': {
+            'vision': {
+                'backbone': {                          # level 2 choice
+                    'values': ['resnet', 'vit'],
+                    'next_level': {
+                        'resnet': {'depth': {'values': [18, 50]},
+                                   'lr': {'min': 1e-4, 'max': 1e-1, 'log': True}},
+                        'vit':    {'patch': {'values': [8, 16]},
+                                   'lr': {'min': 1e-5, 'max': 1e-2, 'log': True}},
+                    },
+                },
+            },
+            'text': {'lr': {'min': 1e-5, 'max': 1e-3, 'log': True}},
+        },
+    },
+    'seed_pool': {'values': [0, 1]},                   # always present
+}
+```
+
+The objective receives only the parameters on the path that was sampled:
+
+```python
+{'task': 'vision', 'backbone': 'resnet', 'depth': 50, 'lr': 0.003, 'seed_pool': 1}
+{'task': 'vision', 'backbone': 'vit',    'patch': 16, 'lr': 2e-4,  'seed_pool': 0}
+{'task': 'text',                                      'lr': 4e-5,  'seed_pool': 1}
+```
+
+Note `lr` appearing three times with three different ranges. That is allowed
+and is the point: a name may repeat across branches that cannot co-occur, and
+each occurrence is a separate node learning from only its own trials. See
+[names must be unique across the tree](#names-must-be-unique-across-the-tree)
+for the rule that governs when a repeat is legal.
+
+#### There is no implicit nesting
+
+A sub-space must hang off `next_level`. Hanging it directly off the choice
+name looks natural — the whole search space is JSON-like, so it reads as
+though structure alone should work — but it is rejected:
+
+```python
+# WRONG — no 'next_level'
+{'model': {'values': ['svm', 'rf'],
+           'svm': {'C': {'min': 0.1, 'max': 10.0}}}}
+```
+```
+SearchSpaceError: model: unexpected keys ['svm'] on a categorical node.
+Allowed: ['next_level', 'prior', 'prior_strength', 'values']
+```
+
+A categorical node accepts exactly those four keys, so this fails at
+validation, before the first objective call, rather than silently dropping the
+sub-space.
 
 ### Priors
 
@@ -241,9 +305,8 @@ KDE_RESERVOIR_SIZE - MIN_GRID_POINTS      # 25 - 10 = 15
 Above that, `prior_strength` is silently clamped: on a continuous parameter,
 `50` and `500` place exactly the same 15 points and are indistinguishable. If
 you want a continuous prior to dominate for longer, raise
-`KDE_RESERVOIR_SIZE` — raising `prior_strength` past 15 does nothing. (Both
-figures moved in 0.6.0, when the reservoir dropped from 50 to 25; the ceiling
-was 40 before.)
+`KDE_RESERVOIR_SIZE` — raising `prior_strength` past 15 does nothing. The
+ceiling tracks the reservoir size, so it moves if you retune that.
 
 Continuous priors are given in the units you defined, so a `log` parameter takes
 its prior on the original scale. Values outside `[min, max]` are rejected.
@@ -473,10 +536,10 @@ directionally consistent with the low-budget measurements, where faster
 commitment helped medians on conditional problems, so it is worth trying rather
 than dismissing.
 
-### The bandwidth floor was wrong, and fixing it moved five other defaults
+### How the bandwidth floor was chosen, and why it moved five other defaults
 
-*Resolved in 0.6.0. Kept here because the shape of the result is the useful
-part.*
+*The floor shipped today is the outcome. The shape of the result is kept here
+because it is the worked example of how to retune this library.*
 
 Every regime sweep selected `min_bandwidth` below the then-shipped `0.01`. A
 knob that wins in every regime is not a regime finding — it is evidence the
@@ -533,6 +596,6 @@ reports a winner that means nothing. **Swept** marks the knobs
 
 `benchmarks/tune.py::apply_config` sets every binding in the **Patch in**
 column and is the reference implementation. `tests/test_constants.py` asserts
-that each of these constants still reaches the search — patching one and
-observing no change is the failure mode this table exists to prevent, and it
-has occurred twice (see the 0.4.0 and 0.5.1 changelog entries).
+that each of these constants still reaches the search. Patching one and
+observing no change is the failure mode this table exists to prevent; it is a
+real one, having happened twice, so the assertions are not ceremonial.

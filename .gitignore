@@ -9,3 +9,6 @@ venv/
 .coverage
 htmlcov/
 .DS_Store
+
+# Downloaded by dev/eval/pcs_stats.py --download
+dev/eval/pcs_cache/

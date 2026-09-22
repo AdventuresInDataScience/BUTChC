@@ -3,6 +3,7 @@
 Task-shaped recipes. For the full parameter list see [api.md](api.md).
 
 - [Tuning a scikit-learn pipeline](#tuning-a-scikit-learn-pipeline)
+- [Nesting more than one level](#nesting-more-than-one-level)
 - [Minimizing](#minimizing)
 - [Passing data to the objective](#passing-data-to-the-objective)
 - [Parallel evaluation](#parallel-evaluation)
@@ -91,6 +92,111 @@ results = BUTChC_optimize(searchspace, objective, budget=150, seed=0,
 print(results['best_params'])
 print(f"CV accuracy: {results['best_value']:.4f}")
 ```
+
+---
+
+## Nesting more than one level
+
+`next_level` composes. A sub-searchspace is just a searchspace, so any
+categorical inside one can carry its own `next_level`, to any depth. This is
+the only nesting mechanism — a sub-space hung directly off a choice name is
+rejected at validation (see
+[api.md](api.md#there-is-no-implicit-nesting)).
+
+Four levels, and each level earns its place:
+
+```python
+searchspace = {
+    'family': {
+        'values': ['linear', 'tree', 'net'],
+        'next_level': {
+            'linear': {
+                'C': {'min': 1e-3, 'max': 1e3, 'log': True},
+                'solver': {
+                    'values': ['liblinear', 'saga'],
+                    'next_level': {
+                        # liblinear cannot do elasticnet; saga can
+                        'liblinear': {'penalty': {'values': ['l1', 'l2']}},
+                        'saga': {
+                            'penalty': {
+                                'values': ['l1', 'l2', 'elasticnet'],
+                                'next_level': {
+                                    # only meaningful for elasticnet
+                                    'elasticnet': {
+                                        'l1_ratio': {'min': 0.0, 'max': 1.0},
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            'tree': {
+                'boost': {
+                    'values': ['gbm', 'rf'],
+                    'next_level': {
+                        'gbm': {'shrink': {'min': 1e-3, 'max': 0.3, 'log': True},
+                                'leaves': {'min': 2, 'max': 64, 'int': True}},
+                        'rf':  {'trees': {'min': 50, 'max': 500, 'int': True}},
+                    },
+                },
+            },
+            'net': {'width': {'values': [64, 128, 256]},
+                    'lr': {'min': 1e-5, 'max': 1e-2, 'log': True}},
+        },
+    },
+    'scaler': {'values': ['standard', 'robust', 'none']},   # always present
+}
+```
+
+Every configuration carries only the parameters on its own path:
+
+```python
+{'family': 'net',    'width': 64, 'lr': 7.3e-05, 'scaler': 'standard'}
+{'family': 'tree',   'boost': 'gbm', 'leaves': 64, 'shrink': 0.018, 'scaler': 'none'}
+{'family': 'tree',   'boost': 'rf', 'trees': 283, 'scaler': 'none'}
+{'family': 'linear', 'solver': 'saga', 'penalty': 'l2', 'C': 0.0157, 'scaler': 'robust'}
+{'family': 'linear', 'solver': 'saga', 'penalty': 'elasticnet',
+                     'l1_ratio': 0.142, 'C': 18.8, 'scaler': 'standard'}
+```
+
+### Nesting is how you express an invalid combination
+
+The `solver`/`penalty` levels above are not decoration. `liblinear` does not
+support an elasticnet penalty, so the pairing is illegal — and because
+`penalty` lives *under* `solver`, the illegal pairing cannot be sampled. Over
+200 trials on the space above, the count of `liblinear` + `elasticnet`
+configurations is zero, and `l1_ratio` never appears without `elasticnet`.
+
+That is the difference between a conditional optimiser and a flat one with a
+penalty term. A flat optimiser must sample the invalid region, score it badly,
+and learn to avoid it, spending budget on all three steps. Here the region does
+not exist.
+
+The technique generalises: **to forbid a combination, make one parameter the
+parent of the other and give each branch only the values that are legal under
+it.** Constraints that cannot be arranged that way — a joint budget over two
+independent continuous parameters, say — are the genuine exception, and are
+covered in [limitations](limitations.md#search-spaces-butchc-cannot-express).
+
+### When to nest and when not to
+
+Nest when a parameter is **meaningless** under some choices — `l1_ratio`
+without elasticnet, `momentum` without sgd. Nesting is what tells the optimiser
+the parameter does not apply.
+
+Do not nest merely to express that a parameter *interacts* with another. Nesting
+requires the parent to be categorical and gives the child a separate model per
+branch, which costs you the shared evidence. If two continuous parameters simply
+depend on each other, leave them as siblings and accept that the marginals will
+not capture it — see
+[limitations](limitations.md#where-the-model-runs-out).
+
+One consequence worth knowing: a name may repeat across branches that cannot
+co-occur, and each occurrence is an independent node. `lr` under `net` and `lr`
+under some other family are two models, learning from their own trials only.
+The [uniqueness rule](api.md#names-must-be-unique-across-the-tree) says exactly
+when a repeat is legal.
 
 ---
 

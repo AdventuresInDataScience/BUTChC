@@ -1,7 +1,8 @@
 # Design notes
 
 Why BUTChC is built the way it is. For the parameter list see
-[api.md](api.md); for recipes see [examples.md](examples.md).
+[api.md](api.md); for recipes see [examples.md](examples.md); for what the
+method does not do see [limitations.md](limitations.md).
 
 ---
 
@@ -378,46 +379,12 @@ evaluation.
 
 ## What this method does not do
 
-- **No parameter interactions within a branch.** Sibling nodes are modelled
-  independently. If two parameters in the same branch interact strongly, the
-  marginals will not capture it. Encode known interactions with `next_level`.
-- **Branch selection uses average, not best-case, performance.** Three
-  mechanisms mitigate it — sub-space-aware commitment, discounting, and a ramp
-  from zero — but a branch whose best configuration is excellent and whose
-  typical configuration is poor is still at a disadvantage while its
-  sub-parameters are untuned.
-- **No acquisition function.** There is no explicit exploration/exploitation
-  optimization: `temp`, `gamma` and `explore` are hand-set knobs, not the output
-  of an uncertainty model.
-- **No formal uncertainty bounds.** `rolling_loss` is not a posterior.
-- **Weaker than a GP on small smooth budgets.** Under ~50 trials on a
-  low-dimensional smooth objective, a Gaussian-process method with a proper
-  acquisition function will typically win. BUTChC's advantages are conditional
-  structure, zero dependencies, and robustness to objective scale.
+The consequences of the trades above — no within-branch interactions, branch
+selection on average rather than best case, no acquisition function, no formal
+uncertainty bounds, and the small-budget gap to a Gaussian process — are
+catalogued with their measured costs in
+**[limitations.md](limitations.md#where-the-model-runs-out)**.
 
----
-
-## Open questions
-
-- **`temp` and `COMMITMENT` fight for one degree of freedom.**
-  `_recompute_prob` raises choice values to `max(sharpen, 1) / (1 + sub_size)`;
-  `sample_node` then softmaxes `log(prob)` at temperature `temp`, which is
-  `prob ** (1/temp)` renormalised. Composed, a choice's sampling probability
-  goes as `value ** (COMMITMENT * progress / ((1 + sub_size) * temp))`. Three
-  quantities multiplying into one exponent is very likely why `temp` reads as
-  inert in sweeps. One of the two should probably own categorical sharpness.
-- **Ordinal parameters have no node type.** Converted spaces flatten them to
-  unordered categoricals, losing neighbourhood structure. A real handicap on
-  long sequences.
-- **`lambda_` and `RANK_SHARPNESS` are also one degree of freedom.** The same
-  collapse as above, on the continuous side, and measured rather than
-  suspected: weights depend only on
-  `min(RANK_SHARPNESS * lambda_, MAX_SHARPNESS)`, so `lambda_=4.0` and
-  `lambda_=8.0` produce identical medians, and so do `lambda_=1.0` and
-  `rank_sharpness=1.5`. At the shipped `RANK_SHARPNESS=3.0` every
-  `lambda_ >= 3.33` is clipped. One of the two should own archive sharpness.
-  Unlike the `temp` case the ceiling is justified — above 10 the search
-  degrades monotonically — so the question is which knob exposes it, not
-  whether to raise it.
-- **`rank_weights` recomputes all weights on every continuous update**, `O(n log n)`
-  per trial. Fine at `K = 25`; it is the hot path if the reservoir ever grows.
+Known tensions in the current design, including the two places where two knobs
+share one degree of freedom, are in
+**[limitations.md](limitations.md#open-design-questions)**.
