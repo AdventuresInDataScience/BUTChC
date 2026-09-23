@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "butchc"
-version = "0.6.0"
+version = "0.6.1"
 description = "Bayesian Update Tree Chained Conditionally — a dependency-free probabilistic black-box hyperparameter optimizer"
 readme = "README.md"
 requires-python = ">=3.8"
