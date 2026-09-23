@@ -1,0 +1,62 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Test and build distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check tag matches package version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PYPROJECT=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          INIT=$(python -c "import re; print(re.search(r'__version__\s*=\s*\"([^\"]+)\"', open('butchc/__init__.py').read()).group(1))")
+          echo "tag=$TAG pyproject=$PYPROJECT __init__=$INIT"
+          if [ "$TAG" != "$PYPROJECT" ] || [ "$TAG" != "$INIT" ]; then
+            echo "::error::Tag v$TAG does not match pyproject.toml ($PYPROJECT) and butchc/__init__.py ($INIT)"
+            exit 1
+          fi
+
+      - name: Run tests
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+          python -m pytest
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install build twine
+          python -m build
+          python -m twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/butchc/
+    permissions:
+      id-token: write  # required for PyPI trusted publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
