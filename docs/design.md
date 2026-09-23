@@ -88,7 +88,7 @@ and the objective disagree about what was evaluated.
 {'counts':   {choice: float},   # discounted sum of ranks earned
  'visits':   {choice: float},   # discounted visit count
  'prob':     {choice: float},   # derived, recomputed every update
- 'sub_size':  int,              # params in the largest sub-space this node opens
+ 'sub_size':  int,              # most params one config below this node can carry
  'prior':    {choice: float},
  'prior_strength': float,
  ['next_level': {choice: subtree}]}
@@ -98,11 +98,11 @@ Each choice is scored by mean rank per visit, smoothed toward `NEUTRAL_QUALITY`
 by `alpha` pseudo-visits:
 
 ```
-value[k] = (counts[k] + alpha * 0.5) / (visits[k] + alpha)
+value[k] = (counts[k] + alpha * NEUTRAL_QUALITY) / (visits[k] + alpha)
 prob[k]  ∝ value[k] ** exponent  ×  prior[k] ** (strength / (strength + visits))
 ```
 
-Because the score is a midrank, `neutral` is knowable in advance rather than
+Because the score is a midrank, `NEUTRAL_QUALITY` (0.5) is knowable in advance rather than
 estimated: a configuration drawn at random has expected rank 0.5. A choice above
 that gains mass, one below loses it, and one nobody has tried sits in the middle
 rather than at zero.

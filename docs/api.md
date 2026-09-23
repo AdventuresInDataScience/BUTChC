@@ -10,6 +10,8 @@ Everything the package exposes. For task-shaped guidance see
 - [Errors](#errors)
 - [`reservoir_summary`](#reservoir_summary)
 - [`butchc.interop`](#butchcinterop)
+- [`prune` and `prune_report`](#prune-and-prune_report)
+- [Tuning by problem shape](#tuning-by-problem-shape)
 - [Module constants](#module-constants)
 
 ---
@@ -366,7 +368,7 @@ means the budget was too small for the tree to settle.
 
 | Raised | When |
 |---|---|
-| `SearchSpaceError` | The search space is malformed. The message names the offending path. Subclasses `ValueError`. |
+| `SearchSpaceError` | The search space is malformed. The message names the offending path. Subclasses `ValueError`; import with `from butchc import SearchSpaceError`. |
 | `ValueError` | A hyperparameter is out of range, or `start_prob_tree` does not match `searchspace`. |
 | `TypeError` | `searchspace` is neither a dict nor a `ConfigurationSpace`; `objective` is not callable or returned a non-numeric value; `executor` has neither `map` nor `submit`. |
 | `RuntimeError` | The objective could not be sent to the executor. The message explains the pickling constraint. |
@@ -440,9 +442,16 @@ Refused, with `UnsupportedSpace` naming the parameter:
 | forbidden clauses | BUTChC cannot express "invalid combination"; it would sample them and waste budget |
 | non-categorical parent | only a categorical node can carry a `next_level` |
 
-The refusals are the point. ConfigSpace expresses conditionality as a DAG,
-BUTChC as a tree; the DAG is strictly more general, so an approximation would
-mean silently optimising a different problem.
+ConfigSpace expresses conditionality as a DAG, BUTChC as a tree; the DAG is
+strictly more general, so an approximation would mean silently optimising a
+different problem.
+
+### `wrap_objective(objective, fixed, casts) -> callable`
+
+Wraps an objective so every config it receives has `fixed` merged in and
+`casts` applied, using the two values `from_configspace` returns. The wrapper
+is picklable, so it works with a process pool. Returns `objective` unchanged
+when both are empty.
 
 ### `to_configspace(searchspace, name='butchc', seed=None) -> (space, names)`
 
@@ -469,7 +478,14 @@ keyed by `"1"`, `"2"`, `"3"`, silently unreachable. `from_json` re-keys each
 
 ---
 
-## `prune(searchspace, result, ...)`
+## `prune` and `prune_report`
+
+```python
+from butchc import prune, prune_report
+
+prune(searchspace, result, threshold=1/3, keep_min=2, protect_best=True,
+      narrow=None, return_tree=False)
+```
 
 Reduce a search space using what a finished run learned, for handing off to
 another optimiser or for a second, narrower run. Returns a new search space;
@@ -479,7 +495,7 @@ the input is not modified.
 |---|---|---|
 | `searchspace` | — | The space the run used |
 | `result` | — | The dict returned by `BUTChC_optimize` |
-| `threshold` | `1/3` | Fraction of uniform below which a choice is dropped. `0.0` drops nothing |
+| `threshold` | `1/3` | Fraction of uniform at or below which a choice is dropped. `0.0` drops nothing |
 | `keep_min` | `2` | Choices kept per node regardless of probability |
 | `protect_best` | `True` | Keep the branch that produced `best_params`, whatever its probability |
 | `narrow` | `None` | If set, also narrow continuous bounds to `mean ± narrow * std`, clipped to the originals |
@@ -492,15 +508,15 @@ Raises `SearchSpaceError` if `result` is not an optimizer result, if
 describing what changed, and an empty list when nothing did.
 
 A branch's probability says where the model would spend the next trial, not
-that the branch is empty of good configurations — see `docs/examples.md` for
-what the defaults protect against and when pruning is too early to be
-meaningful.
+that the branch is empty of good configurations — see
+[examples](examples.md#pruning-a-space-and-handing-it-off) for what the
+defaults protect against and when pruning is too early to be meaningful.
 
 **Warm-starting a follow-up run needs `return_tree=True`.** `result['prob_tree']`
 describes the *original* space — every dropped choice and the original,
 wider continuous bounds are still in it — so passing it as `start_prob_tree`
-for the pruned space fails `BUTChC_optimize`'s exact-match check (see
-`check_tree_matches_searchspace`). `prune(..., return_tree=True)` returns
+for the pruned space raises `ValueError`, because a warm-start tree must match
+its search space exactly. `prune(..., return_tree=True)` returns
 `(searchspace, prob_tree)` instead, where `prob_tree` carries the learned
 statistics for only the choices and archive points that survived pruning and
 is guaranteed to match the returned `searchspace` exactly.
@@ -510,27 +526,31 @@ is guaranteed to match the returned `searchspace` exactly.
 ## Tuning by problem shape
 
 The shipped defaults are an average over problem shapes. You have one shape.
-`benchmarks/tune.py --regime NAME` sweeps against a subset of problems sharing
-one property and prints what that shape wants instead:
+`benchmarks/tune.py --regime NAME`, in the repository, sweeps against a subset
+of problems sharing one property and prints what that shape wants instead:
 
 ```bash
 python benchmarks/tune.py 6 --rounds 1 --regime branched
 ```
 
-Measured at 6 selection seeds and one round — enough to indicate a direction,
-not enough to settle a default. Treat as a starting point and confirm on your
-own space.
+Measured at 6 selection seeds and one round, against the 0.5.1 defaults —
+enough to indicate a direction, not enough to settle a default. Treat as a
+starting point and confirm on your own space. Names are `tune.py`'s:
+`commitment`, `discount`, `neutral` and `reservoir` are the
+[module constants](#module-constants) `COMMITMENT`, `DISCOUNT`,
+`NEUTRAL_QUALITY` and `KDE_RESERVOIR_SIZE`; `warmup_frac` is `n_warmup` as a
+fraction of `budget`.
 
 | Regime | Problems it covers | Recommendation |
 |---|---|---|
 | `branched` | conditional structure | `lambda_ 4.0`, `alpha 0.3`, `commitment 6.0`, `discount 0.95`, `neutral 0.3` |
 | `highdim` | many continuous parameters | no change |
-| `multimodal` | dense local optima | `warmup_frac 0.1`, `reservoir 25` |
+| `multimodal` | dense local optima | `warmup_frac 0.1`, `reservoir 25` (now the default) |
 | `flat` | plateaus and ties | `gamma 0.5` |
 | `noisy` | observation noise | `explore 0.1` |
 
 The `branched` recommendation is the one to read with most suspicion: `alpha
-0.3` against a default of `10.0` is a thirtyfold swing selected on four
+0.3` against the default of `3.0` is a tenfold swing selected on four
 problems, which is exactly the shape of an overfitted result. It is also
 directionally consistent with the low-budget measurements, where faster
 commitment helped medians on conditional problems, so it is worth trying rather
@@ -538,8 +558,8 @@ than dismissing.
 
 ### How the bandwidth floor was chosen, and why it moved five other defaults
 
-*The floor shipped today is the outcome. The shape of the result is kept here
-because it is the worked example of how to retune this library.*
+This is a worked example of retuning the library: one knob that wins
+everywhere invalidates the rest.
 
 Every regime sweep selected `min_bandwidth` below the then-shipped `0.01`. A
 knob that wins in every regime is not a regime finding — it is evidence the
@@ -554,9 +574,7 @@ default is wrong. Measured directly across all 18 problems at 20 paired seeds:
 | Styblinski 4D | -0.0325 | -0.0061 | -0.0001 | **0.0006** |
 
 The reversal below `0.001` is what makes this an interior optimum rather than
-the edge of the grid searched — the previous grid stopped at `0.003`, which was
-also its best value, and a grid whose winner is its own boundary has not
-finished.
+the edge of the grid searched.
 
 Changing it invalidated the selection of every other default, since all of them
 had been chosen with the floor at `0.01`. The re-sweep that followed moved five:
@@ -595,7 +613,5 @@ reports a winner that means nothing. **Swept** marks the knobs
 | `MAX_SHARPNESS` | `butchc._utils` | `_utils` | no | `10.0` | Ceiling, so large `lambda_` cannot collapse the KDE |
 
 `benchmarks/tune.py::apply_config` sets every binding in the **Patch in**
-column and is the reference implementation. `tests/test_constants.py` asserts
-that each of these constants still reaches the search. Patching one and
-observing no change is the failure mode this table exists to prevent; it is a
-real one, having happened twice, so the assertions are not ceremonial.
+column and is the reference implementation. A constant patched in only its
+defining module will appear to have no effect.

@@ -1,12 +1,11 @@
 """Reduce a search space using what a finished run learned about it.
 
-The use case is a handoff. BUTChC is good at deciding *which branch*, and the
-benchmarks are candid that it is less good at squeezing the last few percent
-out of a branch once chosen — `Branch trap` and `Categorical mix` are decisive
-wins, `Optimiser choice` and `Nested pipeline` are not. Spending a fraction of
-the budget on BUTChC to throw away the branches that do not matter, then
-handing the survivors to whatever refines well, plays to that split instead of
-apologising for it.
+The use case is a handoff. BUTChC's clearest margins on conditional problems
+come from deciding *which branch* — `Branch trap` and `Categorical mix` — while
+on `Nested pipeline`, where a branch must be tuned well once chosen, it only
+ties TPE. Spending a fraction of the budget on BUTChC to throw away the
+branches that do not matter, then handing the survivors to a second run or to
+another optimiser, plays to that split.
 
 The output is an ordinary search space: the same dicts BUTChC accepts, so it
 can be fed back into `BUTChC_optimize`, or through `butchc.interop` into
@@ -94,8 +93,7 @@ def prune(searchspace, result, threshold=DEFAULT_THRESHOLD,
                       usable there: it still carries every dropped choice and
                       the original, wider continuous bounds, and
                       `BUTChC_optimize` requires an exact match between a
-                      warm-start tree and the space it is given — see
-                      `check_tree_matches_searchspace`. The returned tree
+                      warm-start tree and the space it is given. The returned tree
                       keeps the learned statistics for every surviving choice
                       and archive point, so the follow-up run resumes rather
                       than restarting; dropped choices and narrowed-away
@@ -106,8 +104,8 @@ def prune(searchspace, result, threshold=DEFAULT_THRESHOLD,
         is set, a `(searchspace, prob_tree)` tuple instead.
 
     Raises:
-        SearchSpaceError: If the tree does not match the space, or if pruning
-            would empty a node.
+        SearchSpaceError: If `result` is not a `BUTChC_optimize` result, if
+            `keep_min < 1`, or if `narrow <= 0`.
 
     Example:
         >>> first = BUTChC_optimize(space, objective, 200, seed=0)

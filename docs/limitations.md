@@ -1,9 +1,8 @@
 # Limitations
 
 Everything BUTChC does not do, does not model, or has not yet measured, kept in
-one place rather than scattered through the documentation. Nothing here is a
-surprise waiting in the code — it is all either a deliberate design trade or a
-piece of evidence not yet gathered.
+one place. Each entry is either a deliberate design trade or a piece of
+evidence not yet gathered.
 
 If you are deciding whether to use the library, the two sections worth reading
 first are [Where the model runs out](#where-the-model-runs-out) and
@@ -106,8 +105,8 @@ across eleven published configuration spaces
 chain-shaped kind are the common case and genuinely independent parents are the
 exception — AutoWEKA's 174 multi-parent children are *all* chain-shaped. So the
 practical reach of the tree model is wider than the converter currently
-admits. Extending it is tracked in
-[`dev/eval/README.md`](../dev/eval/README.md).
+admits, and extending the converter to accept chain-shaped conjunctions is
+planned.
 
 ---
 
@@ -140,21 +139,17 @@ wastes on inactive parameters. Two halves to that, at different stages:
   because those spaces are too narrow for the waste to matter — which is
   consistent with the premise but is not evidence for it.
 
-**Why the obvious candidate is unused.** YAHPO Gym's `rbv2_super` — 41
-parameters, 75.6% inactive, 103 real datasets — is blocked on the
-chain-conjunction refusal described above. The reasoning, and the fallbacks, are
-in [`dev/eval/README.md`](../dev/eval/README.md).
-
-**The real-world tier has not been run at all.** `dev/eval/run_real.py` has
-never been executed against a live surrogate.
+**No real-world benchmark has been run yet.** The obvious candidate, YAHPO
+Gym's `rbv2_super` — 41 parameters, 75.6% inactive, 103 real datasets — is
+blocked on the chain-conjunction refusal described above. Until that lands,
+every published result is on the synthetic suite.
 
 ---
 
 ## The non-results, in full
 
 None of these is a statistically significant loss to TPE. They are the problems
-where BUTChC does not demonstrate an advantage, stated plainly because a suite
-with no such entries would not be believable.
+where BUTChC does not demonstrate an advantage.
 
 **`Rosenbrock` — 13-17, p=0.585.** Expected and structural. A narrow curved
 valley *is* parameter interaction, which the independence assumption cannot
@@ -178,33 +173,35 @@ benchmark your own space.
 **`Plateau (ties)` — 0-0, saturated.** All three methods reach the discretised
 optimum. It is a regression guard for tie handling, not a discriminator.
 
-**`20D sphere` regressed between releases** — from -0.0021 to -0.1255 when the
-defaults were retuned. It costs no win (still 30-0 against TPE, still 150×
-nearer the optimum) and was accepted as the price of gains elsewhere, but it is
-a regression and is reported as one.
+**`20D sphere` regressed between releases** — from -0.0021 to -0.0746 when the
+0.6.0 defaults were compared side by side with 0.5.1's (the benchmark table's
+-0.1255 is a separate 30-seed run). It costs no win (still 30-0 against TPE,
+still 150× nearer the optimum) and was accepted as the price of gains
+elsewhere. A smooth high-dimensional space can recover it by setting
+`KDE_RESERVOIR_SIZE = 50` and `MIN_BANDWIDTH_FRACTION = 0.001`.
 
 ---
 
 ## Reading the tables
 
 - **Ratios flatter.** Most of these objectives are squared errors, where an
-  800× ratio is about 28× in distance. The raw columns are the honest ones.
+  800× ratio is about 28× in distance. Read the raw columns.
 - **Medians hide the spread.** A median gap of 2× on one problem and a 30-0
   record on another are different kinds of evidence. Prefer the win-loss column
   to the median column throughout.
 - **Rastrigin is the hard case.** Dense local optima limit how much any method
   modelling parameters independently can gain.
 - **Overhead is not the headline.** The per-trial cost table measures the
-  optimiser with the objective stubbed out. Against a 100 ms objective the
-  difference is 0.2% and irrelevant. It matters for cheap objectives and for
-  very wide spaces, not in general.
+  optimiser with the objective stubbed out. Against a 100 ms objective
+  BUTChC's own overhead is at most 0.2% of wall clock and TPE's between 1% and
+  28%; against a minute-long objective neither matters. It matters for cheap
+  objectives and for very wide spaces, not in general.
 
 ---
 
 ## Open design questions
 
-Known tensions in the current design, recorded so they are not rediscovered.
-None affects correctness.
+Known tensions in the current design. None affects correctness.
 
 **`temp` and `COMMITMENT` fight for one degree of freedom.** `_recompute_prob`
 raises choice values to `max(sharpen, 1) / (1 + sub_size)`; `sample_node` then

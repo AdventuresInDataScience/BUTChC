@@ -11,6 +11,7 @@ Task-shaped recipes. For the full parameter list see [api.md](api.md).
 - [Warm starting and chaining runs](#warm-starting-and-chaining-runs)
 - [Monitoring convergence](#monitoring-convergence)
 - [Reading the learned tree](#reading-the-learned-tree)
+- [Pruning a space and handing it off](#pruning-a-space-and-handing-it-off)
 - [Saving a search space as JSON](#saving-a-search-space-as-json)
 - [Running against a ConfigSpace benchmark](#running-against-a-configspace-benchmark)
 - [Comparing against Optuna or SMAC](#comparing-against-optuna-or-smac)
@@ -220,8 +221,8 @@ print(f"Minimum found: {-results['best_value']:.4f}")
 
 ## Passing data to the objective
 
-Anything after the keyword-only marker is forwarded to every call. Extra
-arguments **must** be keyword.
+Any keyword argument `BUTChC_optimize` does not recognise is forwarded to every
+objective call. Extra arguments **must** be keyword.
 
 ```python
 def objective(config, X_train, y_train, X_val, y_val):
@@ -323,7 +324,7 @@ searchspace = {
     'learning_rate': {
         'min': 1e-5, 'max': 1e-1, 'log': True,
         'prior': {'mean': 1e-3, 'std': 5e-4},
-        'prior_strength': 20,
+        'prior_strength': 15,        # the most a continuous prior can hold
     },
 }
 ```
@@ -331,7 +332,8 @@ searchspace = {
 A prior is a starting point, not a constraint — `prior_strength` sets how much
 contrary evidence it takes to overturn. Continuous priors always leave at least
 10 grid points spanning the full range, so no strength can make part of the
-range unreachable.
+range unreachable; with the default reservoir of 25 that caps a continuous
+`prior_strength` at 15 (see [priors](api.md#priors)).
 
 ---
 
@@ -426,11 +428,11 @@ you did not.
 
 ## Pruning a space and handing it off
 
-BUTChC is at its best deciding *which branch*. The benchmarks are candid that
-it is less good at extracting the last few percent from a branch once chosen —
-decisive wins on `Branch trap` and `Categorical mix`, losses on `Optimiser
-choice` and `Nested pipeline`. `prune` lets you use the first half of that
-sentence and then hand the problem to something that does the second half.
+BUTChC's clearest margins on conditional problems come from deciding *which
+branch* — `Branch trap` and `Categorical mix` — while on `Nested pipeline`,
+where a branch must be tuned well once chosen, it only ties TPE. `prune` lets
+you use BUTChC to discard branches and then hand the survivors to a second run,
+or to another optimiser.
 
 Spend part of the budget narrowing the space, then search what survives:
 
@@ -466,7 +468,6 @@ whatever the next optimiser speaks:
 ```python
 import optuna
 from butchc import BUTChC_optimize, prune
-from butchc.interop import to_configspace
 
 scout = BUTChC_optimize(searchspace, objective, budget=150, seed=0)
 smaller = prune(searchspace, scout, narrow=2.0)
@@ -484,8 +485,9 @@ study = optuna.create_study(direction='maximize')
 study.optimize(optuna_objective, n_trials=150)
 ```
 
-`to_configspace(smaller)` gives the same reduced space as a `ConfigurationSpace`
-for SMAC or anything else that consumes one.
+This sketch assumes every branch parameter is continuous.
+`butchc.interop.to_configspace(smaller)` gives the same reduced space as a
+`ConfigurationSpace` for SMAC or anything else that consumes one.
 
 ### Narrowing continuous bounds too
 
@@ -509,7 +511,7 @@ noisy.
 
 `prune` protects the branch that produced `best_params` regardless of its
 probability, keeps at least two choices per node, and requires a probability
-below a third of the node's uniform share before dropping anything. Those
+at or below a third of the node's uniform share before dropping anything. Those
 defaults exist because a branch can have a poor average and an excellent best —
 that is precisely what the `Branch trap` benchmark is built from, and it is the
 shape careless pruning destroys.
@@ -542,7 +544,7 @@ one good branch, one adequate one and the rest useless:
 
 At twelve branches and 200 trials the useless options still sit near uniform,
 so nothing clears the threshold and `prune` returns the space unchanged. That
-is the honest outcome — there was no evidence to prune on — but it is also the
+is the correct outcome — there was no evidence to prune on — but it is also the
 case where pruning would have been worth most. If `prune_report` comes back
 empty on a wide node, the scout run was too short, not the space too good.
 
@@ -631,13 +633,15 @@ python benchmarks/evaluate.py 30 --methods random,tpe,optuna,butchc
 
 ## Handling a noisy objective
 
-Raise `gamma` so only strongly ranked trials reach the continuous archive, and
+Raise `gamma` above its default of `0.85` so only strongly ranked trials reach
+the continuous archive, consider `explore=0.1` (what the `noisy` regime sweep
+selects — see [tuning by problem shape](api.md#tuning-by-problem-shape)), and
 score the reported best on a clean evaluation rather than trusting the noisy
 one that won.
 
 ```python
 results = BUTChC_optimize(searchspace, noisy_objective, budget=400,
-                          gamma=0.8, seed=0, verbose=False)
+                          gamma=0.9, explore=0.1, seed=0, verbose=False)
 
 true_value = clean_objective(results['best_params'])
 ```
