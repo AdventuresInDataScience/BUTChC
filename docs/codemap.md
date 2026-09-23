@@ -10,18 +10,15 @@ map of the code, not an argument for it.
 
 ---
 
-## How this was built, and where to be careful with it
+## How the tables are generated
 
-The tables below come from static analysis of the actual source (Python's
-`ast` module, cross-checked by hand against every file), not from memory or a
-docstring sweep. Call resolution is import-aware — it follows `from x import
-y`, module aliases like `import butchc._tree as tree_mod`, `self.method()`,
-and package re-exports through `__init__.py` — rather than matching bare
-names globally. That matters here specifically: several files reuse generic
-parameter names like `objective`, `run` and `main`, and a naive name-matching
-pass falsely linked unrelated functions across files before this was fixed.
+The tables below come from static analysis of the source with Python's `ast`
+module. Call resolution is import-aware — it follows `from x import y`, module
+aliases like `import butchc._tree as tree_mod`, `self.method()`, and package
+re-exports through `__init__.py` — rather than matching bare names globally,
+since several files reuse generic names like `objective`, `run` and `main`.
 
-Three things it cannot see, by design rather than oversight:
+Four things it cannot see:
 
 - **Module-level calls.** A call made directly in a module's top-level code —
   `benchmarks/problems.py` builds its `TUNING`/`HELDOUT`/`NOISY` dicts by

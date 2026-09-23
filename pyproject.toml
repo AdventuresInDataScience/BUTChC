@@ -38,6 +38,9 @@ configspace = ["ConfigSpace>=0.6"]
 [project.urls]
 Homepage = "https://github.com/AdventuresInDataScience/BUTChC"
 Repository = "https://github.com/AdventuresInDataScience/BUTChC"
+Documentation = "https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/api.md"
+Changelog = "https://github.com/AdventuresInDataScience/BUTChC/blob/main/CHANGELOG.md"
+Issues = "https://github.com/AdventuresInDataScience/BUTChC/issues"
 
 [tool.setuptools.packages.find]
 include = ["butchc*"]

@@ -17,21 +17,15 @@ No gradients, no differentiability, no assumptions about the objective's interna
 
 Against TPE across 18 benchmark problems at 30 paired seeds: **13 significant wins, zero significant losses**, at **73–145× lower per-trial cost**.
 
-📖 **[API reference](docs/api.md)** · **[Examples](docs/examples.md)** · **[Design notes](docs/design.md)** · **[Limitations](docs/limitations.md)** · **[Codemap](docs/codemap.md)** · **[Changelog](CHANGELOG.md)**
+📖 **[API reference](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/api.md)** · **[Examples](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/examples.md)** · **[Design notes](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/design.md)** · **[Limitations](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/limitations.md)** · **[Changelog](https://github.com/AdventuresInDataScience/BUTChC/blob/main/CHANGELOG.md)**
 
 ---
 
 ## Install
 
 ```bash
-pip install .                      # from a checkout
-pip install .[configspace]         # + ConfigSpace interop (optional)
-```
-
-Run the tests:
-
-```bash
-pip install pytest && pytest
+pip install butchc
+pip install "butchc[configspace]"    # optional ConfigSpace interop
 ```
 
 ---
@@ -133,11 +127,11 @@ A categorical node can map each of its choices to a sub-searchspace via `next_le
 }
 ```
 
-Each branch keeps its own model, so learning the best `lr` for adam does not interfere with learning the best `lr` for sgd. `next_level` is the only nesting mechanism and it composes, so nesting is arbitrarily deep — [a worked four-level space](docs/examples.md#nesting-more-than-one-level) shows how.
+Each branch keeps its own model, so learning the best `lr` for adam does not interfere with learning the best `lr` for sgd. `next_level` is the only nesting mechanism and it composes, so nesting is arbitrarily deep — [a worked four-level space](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/examples.md#nesting-more-than-one-level) shows how.
 
-This is also how you express an invalid combination. "`penalty=elasticnet` only works with `solver=saga`" becomes a `solver` node whose branches carry different `penalty` values — the invalid pairing is then unreachable, and no budget is spent finding that out. Constraints that cross the tree rather than nest are the exception; see [limitations](docs/limitations.md#search-spaces-butchc-cannot-express).
+This is also how you express an invalid combination. "`penalty=elasticnet` only works with `solver=saga`" becomes a `solver` node whose branches carry different `penalty` values — the invalid pairing is then unreachable, and no budget is spent finding that out. Constraints that cross the tree rather than nest are the exception; see [limitations](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/limitations.md#search-spaces-butchc-cannot-express).
 
-Any node can carry a `prior` and a `prior_strength` measured in pseudo-trials. See the [API reference](docs/api.md#search-space-format) for the full format, priors, and the uniqueness rule for names.
+Any node can carry a `prior` and a `prior_strength` measured in pseudo-trials. See the [API reference](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/api.md#search-space-format) for the full format, priors, and the uniqueness rule for names.
 
 ---
 
@@ -157,7 +151,7 @@ Any node can carry a `prior` and a `prior_strength` measured in pseudo-trials. S
 
 Two properties are load-bearing. **Reflection rather than clipping**: jitter clipped to `[min, max]` deposits probability mass on each bound and biases every search toward interval edges. **Rank rather than raw objective**: raw-value weighting makes behaviour depend on units, and one catastrophic outlier could dominate the archive permanently.
 
-Full reasoning in [design notes](docs/design.md).
+Full reasoning in [design notes](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/design.md).
 
 ---
 
@@ -173,13 +167,13 @@ Full reasoning in [design notes](docs/design.md).
 | `batch` | `1` | you have idle workers | you have no executor |
 | `budget` | 10× param count | rolling loss has not plateaued | rolling loss flat after 20% of the run |
 
-`lambda_` and `alpha` act on different node types and do not interact: `lambda_` controls how sharply continuous archives concentrate, `alpha` how slowly categorical nodes commit. Note `lambda_` saturates — it acts only through `min(RANK_SHARPNESS * lambda_, MAX_SHARPNESS)`, so any value at or above 3.33 is clipped and does nothing. See [api.md](docs/api.md#butchc_optimize).
+`lambda_` and `alpha` act on different node types and do not interact: `lambda_` controls how sharply continuous archives concentrate, `alpha` how slowly categorical nodes commit. Note `lambda_` saturates — it acts only through `min(RANK_SHARPNESS * lambda_, MAX_SHARPNESS)`, so any value at or above 3.33 is clipped and does nothing. See the [API reference](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/api.md#butchc_optimize).
 
 The two knobs most worth reaching for are not in this table. `KDE_RESERVOIR_SIZE` (default 25) and `MIN_BANDWIDTH_FRACTION` (default 0.0003) between them decide how hard the continuous model concentrates, and they carry more of the measured gain than anything else. They interact, so retune them together: a **smooth, high-dimensional** space wants the gentler pair (`50` and `0.001`), while conditional and multimodal spaces want the sharp defaults.
 
 ### Tuning for your problem's shape
 
-The defaults are an average over problem shapes. `benchmarks/tune.py --regime` sweeps against problems sharing one property and prints what that shape wants: `branched` spaces want faster commitment, `noisy` ones want `explore 0.1`, `multimodal` ones want a smaller reservoir. The table is in [docs/api.md](docs/api.md#tuning-by-problem-shape).
+The defaults are an average over problem shapes. `benchmarks/tune.py --regime` (in the repository, not the installed package) sweeps against problems sharing one property and prints what that shape wants: `branched` spaces want faster commitment, `noisy` ones want `explore 0.1`, `multimodal` ones want a short warm-up. The table is in the [API reference](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/api.md#tuning-by-problem-shape).
 
 ---
 
@@ -187,7 +181,9 @@ The defaults are an average over problem shapes. `benchmarks/tune.py --regime` s
 
 Median best objective over 30 paired seeds — same budget, same seeds, every
 method. Every problem is a maximization with optimum 0, so nearer zero is
-better. Re-running the commands below reproduces every table in this section.
+better (Styblinski's offset is rounded, so it can read fractionally above 0).
+Re-running the commands below from a clone of the repository reproduces every
+table in this section.
 
 ```bash
 python benchmarks/evaluate.py 30
@@ -203,7 +199,7 @@ the claims here rest on.
 
 The suite is split in half. Defaults were selected by coordinate descent
 against the **tuned-on** problems only; the **held-out** problems were never
-consulted during that sweep, so they are the honest read on whether the
+consulted during that sweep, so they are the fairer test of whether the
 defaults generalise.
 
 ### Tuned on
@@ -253,7 +249,7 @@ structure a flat model cannot see.
 
 The five ties are genuine non-results rather than hidden losses, and each has a
 reason; they are set out in full in
-[limitations](docs/limitations.md#the-non-results-in-full).
+[limitations](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/limitations.md#the-non-results-in-full).
 
 ### How long a result takes to arrive
 
@@ -286,7 +282,7 @@ against 188, `Optimiser choice` 206 against 115.
 Reliability is consistently BUTChC's. At 50% of the achievable range it reaches
 the target on 27–30 of 30 seeds where TPE manages 10–29; at 99% on `20D sphere`
 it arrives on 29 of 30 seeds while TPE never arrives at all. Full tables in
-[`dev/tools/results/`](dev/tools/results/).
+[`dev/tools/results/`](https://github.com/AdventuresInDataScience/BUTChC/tree/main/dev/tools/results).
 
 ### What the optimiser itself costs
 
@@ -327,9 +323,10 @@ Up to `k=8` the cost sits inside seed noise, which makes an 8× wall-clock speed
 
 The 18 problems above are synthetic and were written in this repository. To
 measure the *shape* of real conditional spaces independently,
-[`dev/eval/pcs_stats.py`](dev/eval/pcs_stats.py) parses configuration spaces
-published by other people, for other purposes, years before this library
-existed, and reports how much of each is inactive in a typical configuration:
+[`dev/eval/pcs_stats.py`](https://github.com/AdventuresInDataScience/BUTChC/blob/main/dev/eval/pcs_stats.py)
+parses eleven configuration spaces published by other people, for other
+purposes, years before this library existed, and reports how much of each is
+inactive in a typical configuration. The five most conditional:
 
 | Space | Params | Median active | Inactive | Depth |
 |---|---|---|---|---|
@@ -351,7 +348,7 @@ representable as a tree exactly rather than approximately.
 This measures the premise the library is built on, in spaces nobody here
 designed. It is not a head-to-head: no BUTChC-versus-TPE run has been executed
 on these spaces yet. Both halves of that are set out in
-[limitations](docs/limitations.md#what-the-benchmarks-establish-and-what-they-do-not).
+[limitations](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/limitations.md#what-the-benchmarks-establish-and-what-they-do-not).
 
 ---
 
@@ -367,7 +364,7 @@ your parameters interact strongly *within* a branch — sibling nodes are
 modelled independently, and `Rosenbrock` measures what that costs.
 
 The complete list of what the library does not model, does not express, and has
-not yet measured is in **[docs/limitations.md](docs/limitations.md)**. The one
+not yet measured is in **[limitations](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/limitations.md)**. The one
 line worth carrying from it: the 18 benchmark problems are synthetic and were
 written alongside the optimiser, so benchmark your own space before committing
 to it.
@@ -376,8 +373,20 @@ to it.
 
 ## Versioning
 
-Defaults and internals change between minor versions, so **seeded runs do not reproduce across them**. See [CHANGELOG.md](CHANGELOG.md).
+Defaults and internals change between minor versions, so **seeded runs do not reproduce across them**. See the [changelog](https://github.com/AdventuresInDataScience/BUTChC/blob/main/CHANGELOG.md).
+
+## Development
+
+```bash
+git clone https://github.com/AdventuresInDataScience/BUTChC
+cd BUTChC
+pip install -e ".[test]"
+pytest
+```
+
+The benchmark suite lives in `benchmarks/`, and a map of the source for
+contributors is in [docs/codemap.md](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/codemap.md).
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/AdventuresInDataScience/BUTChC/blob/main/LICENSE).

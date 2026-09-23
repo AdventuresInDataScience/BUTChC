@@ -139,7 +139,9 @@ def BUTChC_optimize(
         ValueError:       If a hyperparameter is out of range, or if
                           ``start_prob_tree`` does not match ``searchspace``.
         TypeError:        If ``objective`` is not callable or returns a
-                          non-numeric value.
+                          non-numeric value, or ``executor`` has neither
+                          ``map`` nor ``submit``.
+        RuntimeError:     If the objective cannot be sent to ``executor``.
     """
     if not callable(objective):
         raise TypeError(f"objective must be callable, got {type(objective).__name__}")

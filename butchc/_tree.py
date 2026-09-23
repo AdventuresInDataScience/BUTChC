@@ -210,12 +210,8 @@ def _subspace_size(searchspace):
     Every parameter at this level counts once, because they all appear
     together. A branching parameter adds its *largest* branch on top, because
     only one branch is ever taken. Siblings that both branch therefore both
-    contribute — a config drawn from them holds parameters from each.
-
-    Accumulating into the same variable a ``max`` also wrote to made this
-    order-dependent: ``{A, B, C -> {S}}`` scored 3 or 4 depending on which key
-    the dict happened to yield first, and the result divides the commitment
-    exponent, so the same space written two ways committed at two rates.
+    contribute — a config drawn from them holds parameters from each. The
+    result is independent of dict key order.
     """
     total = 0
     for spec in searchspace.values():
