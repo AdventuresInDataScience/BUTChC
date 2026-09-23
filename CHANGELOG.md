@@ -1,6 +1,25 @@
 # Changelog
 
-## 0.6.0 (unreleased)
+## Unreleased
+
+### Added
+
+- **`direction='minimize'`** on `BUTChC_optimize`. The objective is negated
+  internally; `best_value` and `history` are reported in the objective's own
+  units. The default stays `'maximize'`, so existing code is unaffected.
+
+### Changed
+
+- README rewritten for new users. The full benchmark tables moved to
+  [docs/benchmarks.md](docs/benchmarks.md).
+
+### Fixed
+
+- The examples said a `prob_tree` could be checkpointed with `json`. It
+  cannot if any categorical has non-string values, because JSON turns the keys
+  into strings and the reloaded tree is rejected. The docs now use `pickle`.
+
+## 0.6.0
 
 **Seeded runs do not reproduce 0.5.1 results**, because the defaults changed.
 Pass the old values explicitly to restore the previous behaviour.

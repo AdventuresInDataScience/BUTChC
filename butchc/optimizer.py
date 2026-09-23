@@ -51,10 +51,11 @@ def BUTChC_optimize(
     seed=None,
     batch=1,
     executor=None,
+    direction="maximize",
     **kwargs,
 ):
     """
-    Run the BUTChC optimisation loop (maximisation).
+    Run the BUTChC optimisation loop.
 
     Each trial samples a configuration from the probability tree, evaluates
     it, and updates the tree in proportion to how well it scored relative to
@@ -69,8 +70,9 @@ def BUTChC_optimize(
                          representation and are refused rather than
                          approximated.
         objective:       ``Callable(config, **kwargs) -> float``. Higher is
-                         better. Non-finite returns are recorded but excluded
-                         from ranking and from best-tracking.
+                         better unless ``direction='minimize'``. Non-finite
+                         returns are recorded but excluded from ranking and
+                         from best-tracking.
         budget:          Number of objective evaluations.
         lambda_:         Sharpness of the continuous archive's rank weighting.
                          Higher concentrates the KDE on the best archived
@@ -114,13 +116,20 @@ def BUTChC_optimize(
                          executor, a ``multiprocessing.Pool``, joblib, dask.
                          ``None`` evaluates the batch inline. BUTChC never
                          creates a pool of its own.
-        **kwargs:        Forwarded to every call of ``objective``.
+        direction:       ``'maximize'`` (default) or ``'minimize'``. Minimizing
+                         negates the objective internally; ``best_value`` and
+                         ``history`` are reported in the objective's own
+                         units. The ``prob_tree`` stores the negated scores, so
+                         warm-start a run with the same ``direction`` that
+                         produced its tree.
+        **kwargs:       Forwarded to every call of ``objective``.
 
     Returns:
         Dict with keys:
             ``best_params``   Config with the highest objective, or None if
                               no trial returned a finite value.
-            ``best_value``    Its objective value, or ``-inf``.
+            ``best_value``    Its objective value, or ``-inf`` (``+inf`` when
+                              minimizing).
             ``prob_tree``     Final probability tree; pass as
                               ``start_prob_tree`` to continue.
             ``history``       Per-trial dicts with ``params``, ``objective``,
@@ -136,8 +145,9 @@ def BUTChC_optimize(
 
     Raises:
         SearchSpaceError: If ``searchspace`` is malformed.
-        ValueError:       If a hyperparameter is out of range, or if
-                          ``start_prob_tree`` does not match ``searchspace``.
+        ValueError:       If a hyperparameter is out of range, ``direction``
+                          is not recognised, or ``start_prob_tree`` does not
+                          match ``searchspace``.
         TypeError:        If ``objective`` is not callable or returns a
                           non-numeric value, or ``executor`` has neither
                           ``map`` nor ``submit``.
@@ -145,6 +155,7 @@ def BUTChC_optimize(
     """
     if not callable(objective):
         raise TypeError(f"objective must be callable, got {type(objective).__name__}")
+    sign = _direction_sign(direction)
 
     searchspace, objective = _coerce_searchspace(searchspace, objective)
     validate_searchspace(searchspace)
@@ -209,7 +220,9 @@ def BUTChC_optimize(
         had_history = len(observed) >= 1
         scored = []
         for (t, warming, config, trace), value in zip(drawn, raw):
-            obj_val = _as_float(value, t)
+            # Everything below maximizes ``obj_val``; minimizing flips its sign
+            # here and back again wherever a value is reported to the caller.
+            obj_val = sign * _as_float(value, t)
             finite = is_finite_number(obj_val)
 
             rank = 0.5
@@ -262,7 +275,7 @@ def BUTChC_optimize(
             history.append(
                 {
                     "params": config,
-                    "objective": obj_val,
+                    "objective": sign * obj_val,
                     "loss": loss_t,
                     "rolling_loss": rolling,
                     "quality": quality,
@@ -275,8 +288,8 @@ def BUTChC_optimize(
             if verbose:
                 print(
                     f"Trial {t:>{width}}/{budget} | "
-                    f"Objective = {obj_val:.6f} | "
-                    f"Best so far = {best_value:.6f} | "
+                    f"Objective = {sign * obj_val:.6f} | "
+                    f"Best so far = {sign * best_value:.6f} | "
                     f"Quality = {quality:.3f} | "
                     f"Loss = {loss_t:.6f} | "
                     f"Rolling loss = {rolling:.6f}"
@@ -287,7 +300,7 @@ def BUTChC_optimize(
 
     return {
         "best_params": best_params,
-        "best_value": best_value,
+        "best_value": sign * best_value,
         "prob_tree": tree,
         "history": history,
         "loss_history": loss_history,
@@ -337,6 +350,18 @@ def _coerce_searchspace(searchspace, objective):
 
     space, fixed, casts = from_configspace(searchspace)
     return space, wrap_objective(objective, fixed, casts)
+
+
+def _direction_sign(direction):
+    """``+1`` to maximize, ``-1`` to minimize. Either spelling is accepted."""
+    key = direction.lower() if isinstance(direction, str) else direction
+    if key in ("maximize", "maximise", "max"):
+        return 1.0
+    if key in ("minimize", "minimise", "min"):
+        return -1.0
+    raise ValueError(
+        f"direction must be 'maximize' or 'minimize', got {direction!r}"
+    )
 
 
 def _as_float(value, trial):

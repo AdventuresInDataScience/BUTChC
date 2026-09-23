@@ -270,6 +270,43 @@ class TestBestTracking:
         assert result["best_value"] == result["history"][0]["objective"]
 
 
+class TestDirection:
+    @staticmethod
+    def squared_error(config):
+        """Minimise (x-1)^2; the mirror of ``quadratic``."""
+        return (config["x"] - 1.0) ** 2
+
+    def test_minimize_is_maximize_of_the_negation(self):
+        # Same seed, mirrored objective: every trial must match, sign flipped.
+        up = _run(budget=60)
+        down = _run(obj=self.squared_error, budget=60, direction="minimize")
+        assert [h["params"] for h in down["history"]] == \
+            [h["params"] for h in up["history"]]
+        assert down["best_value"] == pytest.approx(-up["best_value"])
+
+    def test_minimize_reports_in_objective_units(self):
+        result = _run(obj=self.squared_error, budget=60, direction="minimize")
+        assert result["best_value"] >= 0.0
+        assert result["best_value"] == min(h["objective"] for h in result["history"])
+        assert self.squared_error(result["best_params"]) == \
+            pytest.approx(result["best_value"])
+
+    def test_minimize_all_non_finite_gives_positive_inf(self):
+        result = _run(obj=lambda c: float("nan"), budget=5, direction="minimize")
+        assert result["best_params"] is None
+        assert result["best_value"] == float("inf")
+
+    @pytest.mark.parametrize("spelling", ["maximise", "MAXIMIZE", "max"])
+    def test_maximize_spellings(self, spelling):
+        assert _run(budget=20, direction=spelling)["best_value"] == \
+            _run(budget=20)["best_value"]
+
+    @pytest.mark.parametrize("bad", ["down", "", None, -1])
+    def test_rejects_unknown_direction(self, bad):
+        with pytest.raises(ValueError, match="direction"):
+            _run(budget=5, direction=bad)
+
+
 # ---------------------------------------------------------------------------
 # Loss / convergence signal
 # ---------------------------------------------------------------------------

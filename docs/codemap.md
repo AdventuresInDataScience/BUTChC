@@ -103,10 +103,11 @@ BUTChC/
 │   └── test_prune.py          `prune`'s refusal-to-remove guarantees, narrowing, reports
 ├── docs/
 │   ├── api.md             parameter-by-parameter reference, search-space format, return value
+│   ├── benchmarks.md      full benchmark tables, methodology and caveats
 │   ├── design.md          why it's built this way — the loop, key decisions, limitations, open questions
 │   ├── examples.md        task-oriented recipes
 │   └── codemap.md         this document
-├── README.md              quick start, search-space format, how it works, tuning guide, benchmarks
+├── README.md              quick start, how it works, search-space format, ConfigSpace, headline results
 ├── CHANGELOG.md           living version history, one section per release
 ├── LICENSE                MIT
 └── pyproject.toml         packaging config — wheel includes only butchc*, so nothing else ships

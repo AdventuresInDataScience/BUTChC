@@ -1,32 +1,31 @@
 # BUTChC
 
-**B**ayesian **U**pdate **T**ree **Ch**ained **C**onditionally — a dependency-free, probabilistic black-box hyperparameter optimizer.
-
-BUTChC maintains a probability distribution over a **hierarchical, conditional search space** and refines it from observed objective values. Parameters can depend on choices made higher up the tree: `momentum` exists only when `optimizer=sgd`, `kernel_size` only when `model=cnn`. Invalid combinations are unreachable by construction rather than discovered by trial, and each branch learns its own parameters from only the trials that used it.
-
-No gradients, no differentiability, no assumptions about the objective's internals.
-
-- **Zero dependencies** — Python ≥ 3.8 standard library only
-- **Conditional search spaces** — nested arbitrarily deep via `next_level`
-- **Non-parametric continuous model** — a weighted KDE elite archive, no distributional assumptions
-- **Scale-invariant** — updates use rank, not raw objective, so an objective in the millions behaves like one in `[0, 1]`
-- **Parallel evaluation** — bring your own executor; threads, processes, joblib, dask
-- **Reproducible** — `seed` gives a private RNG, and the answer does not depend on which worker finishes first
-- **Fails fast** — search spaces and hyperparameters are validated before the first objective call
-- **Prunable** — `prune` turns a finished run into a smaller space, to search again or hand to another optimiser
-
-Against TPE across 18 benchmark problems at 30 paired seeds: **13 significant wins, zero significant losses**, at **73–145× lower per-trial cost**.
-
-📖 **[API reference](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/api.md)** · **[Examples](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/examples.md)** · **[Design notes](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/design.md)** · **[Limitations](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/limitations.md)** · **[Changelog](https://github.com/AdventuresInDataScience/BUTChC/blob/main/CHANGELOG.md)**
-
----
-
-## Install
+**B**ayesian **U**pdate **T**ree **Ch**ained **C**onditionally: a hyperparameter optimizer for search spaces where some settings only exist when others are chosen.
 
 ```bash
 pip install butchc
-pip install "butchc[configspace]"    # optional ConfigSpace interop
 ```
+
+Pure Python, no dependencies, Python 3.8+.
+
+---
+
+## Why BUTChC
+
+Real search spaces are rarely flat. For example, in ML model selection and tuning, `momentum` only matters if `optimizer='sgd'`. `kernel` only matters if `model='svm'`. Most optimizers see every parameter all the time, so they spend trials exploring settings that have no effect.
+
+BUTChC lets you write the search space as a tree. Each option can have its own sub-parameters, and BUTChC only samples and learns them when that option is picked. Invalid combinations cannot be sampled at all.
+
+**Headline results** against TPE (the algorithm behind Optuna's default sampler), over 18 benchmark problems with 30 seeds each:
+
+| | |
+|---|---|
+| **13 wins, 0 losses, 5 ties** | statistically significant, seed-by-seed |
+| **~3× fewer trials** | to match TPE's final result, median across problems (up to 10× on the widest) |
+| **4 of 6 wins on held-out problems** | problems that were never used to tune BUTChC's defaults |
+| **73–145× less overhead per trial** | time the optimizer spends choosing the next config |
+
+These problems are synthetic and were written alongside the optimizer, so benchmark on your own problem too. Full tables, methodology and caveats are in **[benchmarks](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/benchmarks.md)**.
 
 ---
 
@@ -36,53 +35,150 @@ pip install "butchc[configspace]"    # optional ConfigSpace interop
 from butchc import BUTChC_optimize
 
 searchspace = {
-    # Top-level choice of model family. Each choice unlocks its own
-    # sub-parameters via 'next_level'.
     'model_type': {
         'values': ['svm', 'random_forest', 'neural_net'],
-        'next_level': {
+        'next_level': {                      # sub-parameters for each choice
             'svm': {
                 'kernel': {'values': ['rbf', 'linear', 'poly']},
                 'C':      {'min': 0.01, 'max': 100.0, 'log': True},
-                'gamma':  {'min': 1e-4, 'max': 10.0,  'log': True},
             },
             'random_forest': {
                 'n_estimators': {'values': [50, 100, 200, 500]},
                 'max_depth':    {'min': 2, 'max': 30, 'int': True},
-                'max_features': {'values': ['sqrt', 'log2']},
             },
             'neural_net': {
                 'learning_rate': {'min': 1e-4, 'max': 1e-1, 'log': True},
-                'hidden_units':  {'values': [64, 128, 256, 512]},
                 'dropout':       {'min': 0.0, 'max': 0.5},
             },
         },
     },
-    # Always present, whatever model_type is chosen
-    'preprocessing': {'values': ['standard_scaler', 'min_max', 'none']},
+    'scaler': {'values': ['standard', 'min_max', 'none']},   # always present
 }
 
 def objective(config):
-    # config carries 'model_type' and 'preprocessing', plus only the params
-    # of the chosen branch, e.g.
-    #   {'model_type': 'svm', 'kernel': 'rbf', 'C': 4.2, 'gamma': 0.01, ...}
-    # 'dropout' never appears in an svm config; 'C' never in a neural_net one.
-    return cross_val_score(build_model(config), X, y).mean()   # higher is better
+    # config holds only the parameters that apply, e.g.
+    #   {'model_type': 'svm', 'kernel': 'rbf', 'C': 4.2, 'scaler': 'none'}
+    return cross_val_score(build_model(config), X, y).mean()
 
-results = BUTChC_optimize(
-    searchspace = searchspace,
-    objective   = objective,
-    budget      = 150,
-    seed        = 0,
-)
+results = BUTChC_optimize(searchspace, objective, budget=150, seed=0)
 
 print(results['best_params'])
-print(f"Best score: {results['best_value']:.4f}")
+print(results['best_value'])
 ```
 
-BUTChC always **maximizes**. Negate to minimize.
+BUTChC **maximizes** by default. For a loss or error, pass `direction='minimize'`:
 
-### Slow objective? Use an executor
+```python
+results = BUTChC_optimize(searchspace, validation_loss, budget=150,
+                          direction='minimize')
+```
+
+---
+
+## How it works
+
+BUTChC builds a model with the same tree shape as your search space. Every parameter in the tree learns on its own:
+
+- **A categorical parameter** (like `model_type` in the above example) keeps a probability for each option. All options start equal.
+- **A numeric parameter** (like `C` in the above example) keeps a list of 25 good values it has seen. At the start, these are 25 evenly spaced points across the range.
+
+Each trial then runs through the same steps:
+
+1. **Sample a configuration.** BUTChC walks the tree from the top.
+   - For a categorical parameter, it draws an option according to the current probabilities. If that option has sub-parameters, it goes into them. Every other branch is skipped for this trial.
+   - For a numeric parameter, it picks one of the 25 stored values, favouring the better ones, and adds a random offset. The offset is small when the stored values are close together and larger when they are spread out. If the offset would go past `min` or `max`, the value bounces back inside the range, so the edges are not over-sampled.
+   - Each parameter also has a 5% chance (`explore`) of taking a completely random value instead. This means no value is ever ruled out for good.
+
+   Log-scale parameters do all of this on the log scale. Integer parameters are rounded before your objective sees them.
+2. **Run your objective** on that configuration.
+3. **Turn the result into a percentile** among all results so far. The best so far is 1.0 and a middling result is 0.5. From here on, BUTChC uses only this percentile, never the raw value. So an accuracy between 0 and 1 and a cost in the millions behave the same, and one extreme result cannot distort the model.
+4. **Update the categorical parameters that were used.** Each option's score is the average percentile of the trials that picked it, with recent trials counting more. An option that hasn't been tried counts as average (0.5), so it keeps a fair chance. Options with higher scores get higher probabilities.
+5. **Update the numeric parameters that were used**, but only if the trial is in the top 15% of results so far (`gamma=0.85`). The new value joins that parameter's list, and the worst value on the list is dropped. The list is then re-weighted by rank, so that its best value is picked about 400× as often as its worst.
+
+**BUTChC starts broad and gradually commits.** Early on, the small differences between option scores barely change the probabilities, so options are sampled almost evenly. As the budget runs down, those differences are amplified more and more, and BUTChC settles on what works. Options that have their own sub-parameters settle more slowly, so a branch isn't dropped before its sub-parameters have had a chance to be tuned.
+
+Each branch learns only from the trials that used it. For example, in the scenario presented at the start, trials using the neural net teach BUTChC about `learning_rate` and `dropout`, and never change anything under `svm`.
+
+The [design notes](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/design.md) explain why each step is designed this way.
+
+---
+
+## Defining a search space
+
+A search space is a plain Python dict. Each key is a parameter name, and the value says what kind of parameter it is:
+
+| Kind | Example | Your objective receives |
+|---|---|---|
+| Categorical | `{'values': ['relu', 'tanh', 'elu']}` | one of the listed values |
+| Continuous | `{'min': 0.0, 'max': 0.5}` | a `float` in the range |
+| Continuous, log scale | `{'min': 1e-5, 'max': 1e-1, 'log': True}` | a `float`, searched evenly across orders of magnitude |
+| Integer | `{'min': 1, 'max': 6, 'int': True}` | an `int` in the range, inclusive |
+
+Categorical values can be anything hashable: strings, numbers, `True`/`False`, `None`, or a mix. Use a categorical for a short list of specific numbers, like `{'values': [16, 32, 64, 128]}`. Use an integer range when every whole number in between is a valid choice.
+
+**Use `log: True` for ranges that span several orders of magnitude**, like learning rates or regularization strengths. Without it, almost every sample from `[1e-5, 1e-1]` lands above `1e-3`, and small values are never tried.
+
+**Use `next_level` to give a choice its own sub-parameters.** It can be nested as deep as you like:
+
+```python
+'optimizer': {
+    'values': ['adam', 'sgd', 'lbfgs'],
+    'next_level': {
+        'adam': {'lr': {'min': 1e-4, 'max': 1e-2, 'log': True}},
+        'sgd':  {'lr':       {'min': 1e-3, 'max': 1e-1, 'log': True},
+                 'momentum': {'min': 0.0,  'max': 0.99}},
+        # 'lbfgs' has no sub-parameters, so it is simply left out
+    },
+}
+```
+
+The same name (`lr` here) can appear in different branches, and each is learned separately.
+
+This is also how to rule out invalid combinations. If `penalty='elasticnet'` only works with `solver='saga'`, make `penalty` a sub-parameter of each `solver` option, and list only the penalties that solver supports.
+
+The [API reference](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/api.md#search-space-format) covers the full format, including priors (starting BUTChC with a preference for certain values).
+
+---
+
+## Using ConfigSpace
+
+If you already have a [ConfigSpace](https://automl.github.io/ConfigSpace/) `ConfigurationSpace`, from SMAC, auto-sklearn or an HPO benchmark such as YAHPO Gym, BUTChC has built-in converters. Install the optional extra:
+
+```bash
+pip install "butchc[configspace]"
+```
+
+**Simplest: pass it in directly.** BUTChC detects a `ConfigurationSpace` and converts it for you:
+
+```python
+results = BUTChC_optimize(configuration_space, objective, budget=200, seed=0)
+```
+
+Your objective still receives complete configs. Constant parameters are added back in, and log-scaled integers are returned as `int`.
+
+**For more control, convert it yourself** with `from_configspace`. This lets you drop parameters you don't want searched, such as fidelity settings or task IDs in a benchmark:
+
+```python
+from butchc.interop import from_configspace, wrap_objective
+
+space, fixed, casts = from_configspace(configuration_space, drop=['task_id'])
+results = BUTChC_optimize(space, wrap_objective(objective, fixed, casts),
+                          budget=200, seed=0)
+```
+
+`wrap_objective` does the same restoring of constants and integer types as the direct route.
+
+**To go the other way**, `to_configspace(searchspace)` turns a BUTChC search space into a `ConfigurationSpace`. Use it to run Optuna or SMAC on exactly the same space for comparison.
+
+**Some ConfigSpace features cannot be expressed as a tree:** a parameter that depends on more than one parent (including `AndConjunction` and `OrConjunction`), and forbidden clauses. Conversion stops with an `UnsupportedSpace` error naming the parameter involved, rather than quietly optimizing a different problem. Ordinal parameters are converted to plain categoricals, so their order is not used.
+
+More in [examples](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/examples.md#running-against-a-configspace-benchmark).
+
+---
+
+## Running trials in parallel
+
+If your objective is slow, pass an executor and a `batch` size. BUTChC proposes `batch` configurations at once and evaluates them on your executor:
 
 ```python
 from concurrent.futures import ThreadPoolExecutor
@@ -92,288 +188,93 @@ with ThreadPoolExecutor(max_workers=8) as pool:
                               batch=8, executor=pool, seed=0)
 ```
 
-### Already have a ConfigSpace?
+Anything with a `map` or `submit` method works: `concurrent.futures`, `multiprocessing.Pool`, joblib or dask. Batches of up to 8 cost almost nothing in result quality. Larger batches start to hurt, and there is no benefit in setting `batch` above your number of workers.
+
+---
+
+## Saving and resuming a run
+
+The results are plain Python data, so you can save them with `pickle`. To continue a run, pass the saved `prob_tree` back in as `start_prob_tree`. BUTChC then picks up with everything the first run learned:
 
 ```python
-results = BUTChC_optimize(configuration_space, objective, budget=200, seed=0)
+import pickle
+
+results = BUTChC_optimize(searchspace, objective, budget=100, seed=0)
+
+with open('run.pkl', 'wb') as f:
+    pickle.dump(results, f)
+
+# Later, possibly in a new session:
+with open('run.pkl', 'rb') as f:
+    previous = pickle.load(f)
+
+more = BUTChC_optimize(searchspace, objective, budget=100, seed=1,
+                       start_prob_tree=previous['prob_tree'])
+
+best = max(previous, more, key=lambda r: r['best_value'])
 ```
+
+A few things to know:
+
+- **Use the same search space and `direction`** as the saved run. A tree that doesn't match the search space is rejected with an error.
+- **`best_value` and `history` cover only the new run's trials.** Compare with the saved results to get the overall best, as in the last line above. When minimizing, use `min` there instead.
+- **Use `pickle` rather than `json` for the tree.** JSON turns number keys into strings, so a tree with a categorical like `[16, 32, 64]` would not load back correctly.
+
+[Examples](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/examples.md#warm-starting-and-chaining-runs) shows how to change settings between runs and how to save the search space itself as JSON.
 
 ---
 
-## Defining a search space
+## Other features
 
-A search space is a plain dict — JSON-serializable, and no imports needed to write one.
+- **Reproducible.** Setting `seed` gives the same result every time, even with parallel workers finishing in different orders.
+- **Fails fast.** A mistake in the search space or arguments is reported before your objective is ever called.
+- **Narrow a space.** `prune(searchspace, results)` drops branches a run has ruled out, giving a smaller space to search again or hand to another optimizer.
+- **Failed trials are fine.** Return `float('nan')` from the objective and that trial is recorded but ignored.
 
-```python
-'activation':    {'values': ['relu', 'tanh', 'elu']}        # categorical
-'dropout':       {'min': 0.0,  'max': 0.5}                  # linear
-'learning_rate': {'min': 1e-5, 'max': 1e-1, 'log': True}    # log10-uniform
-'n_layers':      {'min': 1,    'max': 6,    'int': True}    # integer-valued
-```
-
-Use `log: True` whenever the range spans more than about one order of magnitude. Sampled linearly, `[1e-5, 1e-1]` places 99.99% of its mass above `1e-3`, leaving the bottom three decades effectively unreachable.
-
-A categorical node can map each of its choices to a sub-searchspace via `next_level`. Those parameters are sampled and updated only when their parent value is chosen:
-
-```python
-'optimizer': {
-    'values': ['adam', 'sgd', 'lbfgs'],
-    'next_level': {
-        'adam': {'lr': {'min': 1e-4, 'max': 1e-2, 'log': True}},
-        'sgd':  {'lr':       {'min': 1e-3, 'max': 1e-1, 'log': True},
-                 'momentum': {'min': 0.0,  'max': 0.99}},
-        # 'lbfgs' takes no sub-params — omitting it is fine
-    },
-}
-```
-
-Each branch keeps its own model, so learning the best `lr` for adam does not interfere with learning the best `lr` for sgd. `next_level` is the only nesting mechanism and it composes, so nesting is arbitrarily deep — [a worked four-level space](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/examples.md#nesting-more-than-one-level) shows how.
-
-This is also how you express an invalid combination. "`penalty=elasticnet` only works with `solver=saga`" becomes a `solver` node whose branches carry different `penalty` values — the invalid pairing is then unreachable, and no budget is spent finding that out. Constraints that cross the tree rather than nest are the exception; see [limitations](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/limitations.md#search-spaces-butchc-cannot-express).
-
-Any node can carry a `prior` and a `prior_strength` measured in pseudo-trials. See the [API reference](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/api.md#search-space-format) for the full format, priors, and the uniqueness rule for names.
+See [examples](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/examples.md) for each of these.
 
 ---
 
-## How it works
+## Settings
 
-1. **Initialize** a probability tree from the search space. Categorical nodes start uniform; continuous nodes start with an evenly spaced reservoir covering the range.
+The defaults are a good starting point. The settings most worth changing:
 
-2. **Sample** by traversing the tree. Categorical nodes draw from a temperature-scaled softmax. Continuous nodes pick a reservoir point weighted by its rank, add Silverman-bandwidth Gaussian jitter, and *reflect* back into range.
+| Setting | Default | What it does |
+|---|---|---|
+| `budget` | required | Number of trials. A rough starting point is 10× the number of parameters. |
+| `direction` | `'maximize'` | Set to `'minimize'` for losses and errors. |
+| `seed` | `None` | Set it for reproducible runs. |
+| `batch`, `executor` | `1`, `None` | Parallel evaluation. See above. |
+| `explore` | `0.05` | Chance of trying a random value instead of a learned one. Raise it (e.g. `0.1`) if the search settles too early or the objective is noisy. |
+| `verbose` | `True` | Print a line per trial. |
 
-3. **Evaluate** the objective.
-
-4. **Rank** the result against every finite objective seen so far, counting ties as half. Continuous nodes apply the `gamma` gate and convert what survives into a `quality` in `[0, 1]`; categorical nodes use the raw rank, ungated.
-
-5. **Update**. Categorical nodes score each choice by its recency-weighted mean rank, smoothed by `alpha` pseudo-visits. Continuous nodes append to an elite archive, evict the worst-scoring entry, and reweight geometrically by rank.
-
-6. **Repeat**, with categorical commitment ramping up over the budget.
-
-Two properties are load-bearing. **Reflection rather than clipping**: jitter clipped to `[min, max]` deposits probability mass on each bound and biases every search toward interval edges. **Rank rather than raw objective**: raw-value weighting makes behaviour depend on units, and one catastrophic outlier could dominate the archive permanently.
-
-Full reasoning in [design notes](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/design.md).
+The finer model settings (`lambda_`, `alpha`, `temp`, `gamma`, `n_warmup`) and advice on tuning them for different kinds of problems are in the [API reference](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/api.md#butchc_optimize).
 
 ---
 
-## Tuning
+## When to use it
 
-| Parameter | Start | Increase if… | Decrease if… |
-|---|---|---|---|
-| `lambda_` | `2.0` | tree adapts too slowly | converging too fast to a suboptimal region |
-| `alpha` | `3.0` | many categorical options, small budget | want faster commitment to early evidence |
-| `temp` | `1.0` | categorical exploration too greedy | budget spent on clearly bad choices |
-| `gamma` | `0.85` | objective is noisy; want only strong trials to count | want more trials contributing signal |
-| `explore` | `0.05` | search collapses to a local optimum early | objective is expensive and smooth |
-| `batch` | `1` | you have idle workers | you have no executor |
-| `budget` | 10× param count | rolling loss has not plateaued | rolling loss flat after 20% of the run |
+**Good fit:** conditional search spaces, many parameters, a mix of categorical and numeric settings, objectives on awkward scales, or projects that cannot take on extra dependencies.
 
-`lambda_` and `alpha` act on different node types and do not interact: `lambda_` controls how sharply continuous archives concentrate, `alpha` how slowly categorical nodes commit. Note `lambda_` saturates — it acts only through `min(RANK_SHARPNESS * lambda_, MAX_SHARPNESS)`, so any value at or above 3.33 is clipped and does nothing. See the [API reference](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/api.md#butchc_optimize).
+**Consider something else:**
 
-The two knobs most worth reaching for are not in this table. `KDE_RESERVOIR_SIZE` (default 25) and `MIN_BANDWIDTH_FRACTION` (default 0.0003) between them decide how hard the continuous model concentrates, and they carry more of the measured gain than anything else. They interact, so retune them together: a **smooth, high-dimensional** space wants the gentler pair (`50` and `0.001`), while conditional and multimodal spaces want the sharp defaults.
+- **Very small budgets (under ~50 trials) on a smooth objective with few parameters.** A Gaussian-process optimizer will usually do better.
+- **Parameters that strongly interact within a branch.** BUTChC learns each parameter separately, so it cannot capture effects like "a high learning rate only works with a low momentum".
 
-### Tuning for your problem's shape
-
-The defaults are an average over problem shapes. `benchmarks/tune.py --regime` (in the repository, not the installed package) sweeps against problems sharing one property and prints what that shape wants: `branched` spaces want faster commitment, `noisy` ones want `explore 0.1`, `multimodal` ones want a short warm-up. The table is in the [API reference](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/api.md#tuning-by-problem-shape).
+The full list is in **[limitations](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/limitations.md)**.
 
 ---
 
-## Results
+## Documentation
 
-Median best objective over 30 paired seeds — same budget, same seeds, every
-method. Every problem is a maximization with optimum 0, so nearer zero is
-better (Styblinski's offset is rounded, so it can read fractionally above 0).
-Re-running the commands below from a clone of the repository reproduces every
-table in this section.
+- **[API reference](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/api.md)**: every function and argument
+- **[Examples](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/examples.md)**: worked examples for common tasks
+- **[Benchmarks](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/benchmarks.md)**: full results and how to reproduce them
+- **[Design notes](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/design.md)**: why the algorithm works the way it does
+- **[Limitations](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/limitations.md)**: what it can't do and what hasn't been tested
+- **[Changelog](https://github.com/AdventuresInDataScience/BUTChC/blob/main/CHANGELOG.md)**
 
-```bash
-python benchmarks/evaluate.py 30
-python benchmarks/evaluate.py 10 --suite heldout --methods tpe,butchc
-```
-
-Random search is a low bar, so the comparator carried throughout is TPE — same
-niche, and what a user choosing against BUTChC would actually reach for.
-`benchmarks/baselines.py` carries a dependency-free TPE and an Optuna
-`TPESampler` wrapper. `evaluate.py` also reports paired win-loss records and
-two-sided exact sign-test p-values; those records, not the medians, are what
-the claims here rest on.
-
-The suite is split in half. Defaults were selected by coordinate descent
-against the **tuned-on** problems only; the **held-out** problems were never
-consulted during that sweep, so they are the fairer test of whether the
-defaults generalise.
-
-### Tuned on
-
-| Problem | Budget | Random | TPE | BUTChC | vs TPE |
-|---|---|---|---|---|---|
-| 2D quadratic | 200 | -0.0425 | -0.0004 | **-0.0000** | 30-0, p=0.000 |
-| 5D sphere | 500 | -3.7393 | -0.1312 | **-0.0000** | 29-1, p=0.000 |
-| Rosenbrock | 500 | -0.1036 | **-0.0202** | -0.0368 | 13-17, p=0.585 |
-| Rastrigin 4D | 600 | -17.5005 | -8.6510 | **-5.1169** | 26-4, p=0.000 |
-| 10D sphere | 1000 | -19.0750 | -2.2176 | **-0.0036** | 30-0, p=0.000 |
-| Ackley 5D | 600 | -14.1027 | -4.3008 | **-0.0323** | 30-0, p=0.000 |
-| Log-scale target | 200 | -0.0085 | -0.0006 | **-0.0000** | 29-1, p=0.000 |
-| Branch trap | 300 | -0.6219 | -1.0004 | **-0.0189** | 25-5, p=0.000 |
-| Categorical mix | 300 | -0.3226 | -0.0680 | **-0.0004** | 28-2, p=0.000 |
-| Integer mix | 300 | -0.2727 | -0.0016 | **-0.0000** | 26-4, p=0.000 |
-| Plateau (ties) | 300 | -0.5000 | -0.5000 | -0.5000 | 0-0, p=1.000 |
-
-### Held out
-
-| Problem | Budget | Random | TPE | BUTChC | vs TPE |
-|---|---|---|---|---|---|
-| Griewank 6D | 800 | -1.0183 | -0.4915 | **-0.4383** | 18-12, p=0.362 |
-| Styblinski 4D | 600 | -20.0007 | -4.0751 | **+0.0007** | 30-0, p=0.000 |
-| Nested pipeline | 400 | -0.2970 | -0.0096 | **-0.0089** | 15-15, p=1.000 |
-| Optimiser choice | 300 | -0.0277 | -0.0007 | **-0.0001** | 25-5, p=0.000 |
-| Rastrigin 8D | 1000 | -62.4076 | -39.0921 | **-21.5439** | 28-2, p=0.000 |
-| 20D sphere | 1500 | -69.0434 | -18.8961 | **-0.1255** | 30-0, p=0.000 |
-
-Four of the six held-out problems are significant wins on defaults that never
-saw them.
-
-### Under observation noise
-
-Scoring the *reported* best on the noise-free function (5D sphere, N(0,1)
-noise, budget 400): random -4.8604, TPE -0.8099, BUTChC **-0.4490** — 19-11
-against TPE at p=0.200, better on the median but not separable at 30 seeds.
-
-### What the records show
-
-**13 significant wins, zero significant losses, 5 ties**, across all 18
-problems. The margins are large where they are large: `Styblinski 4D` reaches
-the optimum outright (+0.0007 against -4.0751, 30-0), `20D sphere` lands 150×
-nearer it, `Ackley 5D` 133× nearer. `Branch trap` is 25-5 on a problem where
-TPE does *worse than random*, because the trap is precisely the conditional
-structure a flat model cannot see.
-
-The five ties are genuine non-results rather than hidden losses, and each has a
-reason; they are set out in full in
-[limitations](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/limitations.md#the-non-results-in-full).
-
-### How long a result takes to arrive
-
-Final quality says where a method ends up, not when. `evaluate.py --anytime`
-reports the other axis. The clearest framing is **how much budget BUTChC needs
-to match TPE's final answer**:
-
-| Problem | Budget | Trials BUTChC needed | Fraction of budget |
-|---|---|---|---|
-| 20D sphere | 1500 | 148 | **1/10.1** |
-| 10D sphere | 1000 | 138 | **1/7.3** |
-| Styblinski 4D | 600 | 146 | 1/4.1 |
-| Ackley 5D | 600 | 155 | 1/3.9 |
-| 5D sphere | 500 | 128 | 1/3.9 |
-| Rastrigin 8D | 1000 | 325 | 1/3.1 |
-| Integer mix | 300 | 100 | 1/3.0 |
-| Categorical mix | 300 | 107 | 1/2.8 |
-| Branch trap | 300 | 111 | 1/2.7 |
-| Nested pipeline | 400 | 324 | 1/1.2 |
-
-On every problem it reaches, BUTChC matches TPE's *final* result partway
-through its own budget — median around a third of it.
-
-Against TPE's own arrival time the picture is split. On high-dimensional
-problems BUTChC is far quicker: `20D sphere` in 148 trials against TPE's 1133,
-on 30 of 30 seeds against TPE's 15. On conditional problems it arrives later
-even while matching or beating TPE's final quality — `Nested pipeline` 324
-against 188, `Optimiser choice` 206 against 115.
-
-Reliability is consistently BUTChC's. At 50% of the achievable range it reaches
-the target on 27–30 of 30 seeds where TPE manages 10–29; at 99% on `20D sphere`
-it arrives on 29 of 30 seeds while TPE never arrives at all. Full tables in
-[`dev/tools/results/`](https://github.com/AdventuresInDataScience/BUTChC/tree/main/dev/tools/results).
-
-### What the optimiser itself costs
-
-Sample efficiency is one axis; the wall clock the optimiser spends choosing is
-another. With the objective stubbed to a constant, so the number is all
-optimiser:
-
-| Optimiser | 1D | 5D | 20D |
-|---|---|---|---|
-| **BUTChC** (pure Python, 0 deps) | **14 µs** | **52 µs** | **193 µs** |
-| TPE (this repo, pure Python) | 1037 µs | 5219 µs | 21270 µs |
-| Optuna `TPESampler` (numpy-backed) | 1433 µs | 6789 µs | 27864 µs |
-
-BUTChC is **73–145× cheaper per trial** than either TPE. Zero dependencies is
-not costing speed here: the numpy-backed implementation pays ~145× more per
-suggestion, because TPE refits Parzen estimators over the whole history and
-scores candidates, while BUTChC draws a reservoir point and jitters it —
-`O(d·K)` with `K = 25`. The gap widens with width, since BUTChC only touches
-the parameters on the sampled path while a flat model touches all of them.
-
-Reproduce with `python benchmarks/overhead.py`.
-
-### What batching costs
-
-A batch of `k` leaves the model stale for `k-1` evaluations. Median extra regret against sequential, 18 problems × 20 seeds at matched budgets:
-
-| `batch` | 2 | 4 | 8 | 16 | 32 |
-|---|---|---|---|---|---|
-| Extra regret | −3.3% | −0.1% | +2.6% | +21.3% | +43.1% |
-
-```bash
-python benchmarks/batch_cost.py 20 --sizes 1,2,4,8,16,32
-```
-
-Up to `k=8` the cost sits inside seed noise, which makes an 8× wall-clock speedup close to free. Past `k=16` it is real. Batch sizes above your worker count pay the cost for nothing.
-
-### The spaces this is built for
-
-The 18 problems above are synthetic and were written in this repository. To
-measure the *shape* of real conditional spaces independently,
-[`dev/eval/pcs_stats.py`](https://github.com/AdventuresInDataScience/BUTChC/blob/main/dev/eval/pcs_stats.py)
-parses eleven configuration spaces published by other people, for other
-purposes, years before this library existed, and reports how much of each is
-inactive in a typical configuration. The five most conditional:
-
-| Space | Params | Median active | Inactive | Depth |
-|---|---|---|---|---|
-| AutoWEKA | 786 | 14 | **98.2%** | 4 |
-| auto-sklearn (2017) | 138 | 16 | **88.4%** | 2 |
-| SparrowToRiss | 222 | 67 | 69.8% | 4 |
-| SATenstein | 54 | 26 | 51.9% | 4 |
-| clasp 3.1.4 | 98 | 59 | 39.8% | 3 |
-
-```bash
-python dev/eval/pcs_stats.py --download
-```
-
-In AutoWEKA, 98.2% of the declared parameters are inactive in any given
-configuration — the share a flat optimiser searches and a conditional one
-skips. All 174 of its multi-parent conditions are chain-shaped, so the space is
-representable as a tree exactly rather than approximately.
-
-This measures the premise the library is built on, in spaces nobody here
-designed. It is not a head-to-head: no BUTChC-versus-TPE run has been executed
-on these spaces yet. Both halves of that are set out in
-[limitations](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/limitations.md#what-the-benchmarks-establish-and-what-they-do-not).
-
----
-
-## Where it fits
-
-Reach for BUTChC when the search space is conditional, when it is wide, when
-the objective is noisy or on an awkward scale, or when adding a dependency is
-not an option. Those are the axes it is measured strongest on.
-
-Reach for something else when the budget is under ~50 trials on a smooth
-low-dimensional objective, where a Gaussian process will do better, or when
-your parameters interact strongly *within* a branch — sibling nodes are
-modelled independently, and `Rosenbrock` measures what that costs.
-
-The complete list of what the library does not model, does not express, and has
-not yet measured is in **[limitations](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/limitations.md)**. The one
-line worth carrying from it: the 18 benchmark problems are synthetic and were
-written alongside the optimiser, so benchmark your own space before committing
-to it.
-
----
-
-## Versioning
-
-Defaults and internals change between minor versions, so **seeded runs do not reproduce across them**. See the [changelog](https://github.com/AdventuresInDataScience/BUTChC/blob/main/CHANGELOG.md).
+Defaults can change between minor versions, so **a seeded run may give different results after an upgrade**.
 
 ## Development
 
@@ -384,9 +285,8 @@ pip install -e ".[test]"
 pytest
 ```
 
-The benchmark suite lives in `benchmarks/`, and a map of the source for
-contributors is in [docs/codemap.md](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/codemap.md).
+The benchmark scripts are in `benchmarks/`, and a map of the source code is in [docs/codemap.md](https://github.com/AdventuresInDataScience/BUTChC/blob/main/docs/codemap.md).
 
 ## License
 
-MIT — see [LICENSE](https://github.com/AdventuresInDataScience/BUTChC/blob/main/LICENSE).
+MIT. See [LICENSE](https://github.com/AdventuresInDataScience/BUTChC/blob/main/LICENSE).

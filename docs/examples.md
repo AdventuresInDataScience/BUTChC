@@ -203,18 +203,20 @@ when a repeat is legal.
 
 ## Minimizing
 
-BUTChC always maximizes. Negate.
+BUTChC maximizes by default. Pass `direction='minimize'` for a loss, an error,
+or anything where lower is better.
 
 ```python
 def rosenbrock(config):
     x, y = config['x'], config['y']
-    return -((1 - x) ** 2 + 100 * (y - x ** 2) ** 2)
+    return (1 - x) ** 2 + 100 * (y - x ** 2) ** 2
 
 results = BUTChC_optimize(
     {'x': {'min': -2.0, 'max': 2.0}, 'y': {'min': -1.0, 'max': 3.0}},
     rosenbrock, budget=500, seed=0, verbose=False,
+    direction='minimize',
 )
-print(f"Minimum found: {-results['best_value']:.4f}")
+print(f"Minimum found: {results['best_value']:.4f}")
 ```
 
 ---
@@ -360,15 +362,22 @@ start goes straight to modelling unless you ask for warm-up explicitly, and if
 you pass `n_warmup=20` alongside a `start_prob_tree` you get twenty uniform
 trials against the tree you just loaded.
 
-To survive a crash or a scheduler timeout, checkpoint the tree — it is plain
-data, so `pickle` or `json` both work:
+To survive a crash or a scheduler timeout, checkpoint the tree with `pickle`:
 
 ```python
-import json
+import pickle
 
-with open('tree.json', 'w') as fh:
-    json.dump(results['prob_tree'], fh)
+with open('tree.pkl', 'wb') as fh:
+    pickle.dump(results['prob_tree'], fh)
+
+with open('tree.pkl', 'rb') as fh:
+    tree = pickle.load(fh)
 ```
+
+Don't use `json` for the tree. JSON object keys are always strings, so a
+categorical over `[16, 32, 64]` comes back keyed by `"16"`, and the reloaded
+tree is rejected as not matching the search space. (`to_json`/`from_json`
+handle this for search spaces, but not for trees.)
 
 ---
 

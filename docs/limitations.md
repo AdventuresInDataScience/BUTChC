@@ -61,8 +61,6 @@ questions — one is the best single point seen, the other is where the model
 would spend its next trial. A large disagreement means the budget was too small
 for the tree to settle.
 
-**Maximization only.** Negate to minimize.
-
 **Not a Gaussian-process method.** On very small budgets — under roughly 50
 trials — against a cheap-to-model smooth objective, a GP with a proper
 acquisition function will typically do better. BUTChC's measured advantages are

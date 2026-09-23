@@ -37,12 +37,13 @@ results = BUTChC_optimize(
     seed            = None,
     batch           = 1,
     executor        = None,
+    direction       = 'maximize',
     **kwargs,
 )
 ```
 
-Maximizes `objective` over `searchspace` in `budget` evaluations. Negate to
-minimize.
+Maximizes `objective` over `searchspace` in `budget` evaluations, or minimizes
+it with `direction='minimize'`.
 
 Arguments after `*` are keyword-only. `**kwargs` is forwarded verbatim to every
 `objective` call, so any extra data your objective needs goes there.
@@ -52,8 +53,9 @@ Arguments after `*` are keyword-only. `**kwargs` is forwarded verbatim to every
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `searchspace` | `dict` \| `ConfigurationSpace` | — | See [format](#search-space-format). A `ConfigSpace.ConfigurationSpace` is converted on entry. |
-| `objective` | `callable` | — | `(config, **kwargs) → float`. Higher is better. Non-finite returns are recorded but excluded from ranking and from best-tracking. |
+| `objective` | `callable` | — | `(config, **kwargs) → float`. Higher is better unless `direction='minimize'`. Non-finite returns are recorded but excluded from ranking and from best-tracking. |
 | `budget` | `int` | — | Number of objective evaluations. Exact — a `batch` that does not divide it truncates the final batch rather than overrunning. |
+| `direction` | `str` | `'maximize'` | `'maximize'` or `'minimize'` (British spellings accepted). Minimizing negates the objective internally; `best_value` and `history` stay in the objective's own units, and `best_value` is `+inf` if no trial was finite. The `prob_tree` stores negated scores, so warm-start with the same `direction` that produced it. |
 
 ### Model shape
 
